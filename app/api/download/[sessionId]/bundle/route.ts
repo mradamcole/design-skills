@@ -1,12 +1,16 @@
 import JSZip from "jszip";
 import { getSession } from "@/lib/store";
+import type { EmbeddedAsset } from "@/lib/types";
 
-export async function GET(_request: Request, { params }: { params: Promise<{ sessionId: string }> }) {
+type BundleAssetMode = "reference" | "download";
+
+export async function GET(request: Request, { params }: { params: Promise<{ sessionId: string }> }) {
   const { sessionId } = await params;
   const session = getSession(sessionId);
   if (!session?.skillDraft?.markdown && !session?.existingSkill) {
     return new Response("No skill available", { status: 404 });
   }
+  const assetMode = resolveAssetMode(request);
   const zip = new JSZip();
   zip.file("SKILL.md", session.skillDraft?.markdown || session.existingSkill || "");
   zip.file(
@@ -17,6 +21,35 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
   for (const asset of session.assets) {
     const safeName = asset.name.replace(/[^\w.\-]+/g, "_");
     if (asset.content) zip.file(`assets/${safeName}.txt`, asset.content);
+    if (assetMode === "download" && asset.type === "url" && asset.embeddedAssets?.length) {
+      for (const embeddedAsset of asset.embeddedAssets) {
+        if (!embeddedAsset.bytesBase64 || embeddedAsset.status !== "fetched") continue;
+        const folder = folderForKind(embeddedAsset);
+        zip.file(
+          `${folder}/${safeEmbeddedFileName(embeddedAsset)}`,
+          Buffer.from(embeddedAsset.bytesBase64, "base64")
+        );
+      }
+    }
+  }
+  if (assetMode === "download") {
+    const inventory = session.assets.flatMap((asset) =>
+      (asset.embeddedAssets || []).map((embedded) => ({
+        parentAsset: asset.name,
+        kind: embedded.kind,
+        sourceUrl: embedded.sourceUrl,
+        mimeType: embedded.mimeType,
+        fileName: embedded.fileName,
+        status: embedded.status,
+        warning: embedded.warning
+      }))
+    );
+    zip.file("assets/embedded/index.json", JSON.stringify({ mode: assetMode, count: inventory.length, assets: inventory }, null, 2));
+  } else {
+    zip.file(
+      "assets/embedded/index.json",
+      JSON.stringify({ mode: assetMode, note: "Embedded assets are referenced only in this bundle mode." }, null, 2)
+    );
   }
   const bytes = await zip.generateAsync({ type: "uint8array" });
   return new Response(Buffer.from(bytes), {
@@ -25,4 +58,23 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
       "content-disposition": 'attachment; filename="design-skill.zip"'
     }
   });
+}
+
+function resolveAssetMode(request: Request): BundleAssetMode {
+  const url = new URL(request.url);
+  const value = (url.searchParams.get("assetMode") || "").toLowerCase();
+  return value === "download" ? "download" : "reference";
+}
+
+function folderForKind(asset: EmbeddedAsset) {
+  if (asset.kind === "icon") return "assets/embedded/icons";
+  if (asset.kind === "image") return "assets/embedded/images";
+  if (asset.kind === "font") return "assets/embedded/fonts";
+  if (asset.kind === "stylesheet") return "assets/embedded/styles";
+  if (asset.kind === "manifest") return "assets/embedded/manifests";
+  return "assets/embedded/other";
+}
+
+function safeEmbeddedFileName(asset: EmbeddedAsset) {
+  return `${asset.id.slice(0, 8)}_${asset.fileName.replace(/[^\w.\-]+/g, "_")}`;
 }

@@ -3,6 +3,8 @@ export type ProviderKind = "openai" | "ollama";
 export type SessionMode = "generate" | "verify";
 
 export type AssetType = "image" | "url" | "pdf" | "markdown" | "text" | "document" | "unsupported";
+export type EmbeddedAssetKind = "icon" | "image" | "font" | "stylesheet" | "manifest" | "other";
+export type EmbeddedAssetFetchStatus = "fetched" | "skipped" | "error";
 
 export type AssetStatus = "queued" | "ready" | "warning" | "error";
 
@@ -60,8 +62,21 @@ export interface DesignAsset {
   mimeType: string;
   content?: string;
   dataUrl?: string;
+  embeddedAssets?: EmbeddedAsset[];
   status: AssetStatus;
   warning?: string;
+}
+
+export interface EmbeddedAsset {
+  id: string;
+  kind: EmbeddedAssetKind;
+  sourceUrl: string;
+  fileName: string;
+  mimeType: string;
+  fetchedAt: number;
+  status: EmbeddedAssetFetchStatus;
+  warning?: string;
+  bytesBase64?: string;
 }
 
 export interface ProgressEvent {

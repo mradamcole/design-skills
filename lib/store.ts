@@ -35,6 +35,7 @@ function ensureSettingsMemory(value: Partial<UserSettingsMemory> | undefined): U
 function cloneAsset(asset: DesignAsset): DesignAsset {
   return {
     ...asset,
+    embeddedAssets: asset.embeddedAssets?.map((embedded) => ({ ...embedded })),
     id: crypto.randomUUID()
   };
 }
@@ -83,6 +84,37 @@ export function addAsset(sessionId: string, asset: DesignAsset) {
   store.settingsMemory.assets.push({ ...asset });
   session.updatedAt = Date.now();
   return asset;
+}
+
+export function removeAsset(sessionId: string, assetId: string) {
+  const session = getSession(sessionId);
+  if (!session) {
+    throw new Error("Session not found");
+  }
+
+  const targetAsset = session.assets.find((asset) => asset.id === assetId);
+  if (!targetAsset) return false;
+
+  session.assets = session.assets.filter((asset) => asset.id !== assetId);
+
+  const memoryByIdIndex = store.settingsMemory.assets.findIndex((asset) => asset.id === assetId);
+  if (memoryByIdIndex >= 0) {
+    store.settingsMemory.assets.splice(memoryByIdIndex, 1);
+  } else {
+    const memoryByFingerprintIndex = store.settingsMemory.assets.findIndex(
+      (asset) =>
+        asset.name === targetAsset.name &&
+        asset.source === targetAsset.source &&
+        asset.type === targetAsset.type &&
+        asset.mimeType === targetAsset.mimeType
+    );
+    if (memoryByFingerprintIndex >= 0) {
+      store.settingsMemory.assets.splice(memoryByFingerprintIndex, 1);
+    }
+  }
+
+  session.updatedAt = Date.now();
+  return true;
 }
 
 export function addProgress(

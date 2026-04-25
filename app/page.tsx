@@ -38,6 +38,7 @@ Use this skill when generating or reviewing interfaces for this design system.
 
 export default function Home() {
   type RunState = "idle" | "running" | "complete" | "error";
+  type BundleAssetMode = "reference" | "download";
   type OpenAIModelOption = { id: string; label: string; approxCostPer1M?: number };
   type UiLogEntry =
     | { id: string; kind: "event"; event: ProgressEvent }
@@ -83,6 +84,7 @@ export default function Home() {
   const [memoryReady, setMemoryReady] = useState(false);
   const [sampleSyncStatus, setSampleSyncStatus] = useState<"empty" | "synced" | "stale" | "refreshing" | "error">("empty");
   const [lastSampleMarkdown, setLastSampleMarkdown] = useState("");
+  const [bundleAssetMode, setBundleAssetMode] = useState<BundleAssetMode>("reference");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<HTMLDivElement>(null);
@@ -378,6 +380,23 @@ export default function Home() {
     await refreshSession();
   }
 
+  async function removeAssetById(assetId: string) {
+    if (!session) return;
+    setBusy(true);
+    setNotice("");
+    const response = await fetch("/api/assets", {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: session.id, assetId })
+    });
+    setBusy(false);
+    if (!response.ok) {
+      setNotice(await response.text());
+      return;
+    }
+    await refreshSession();
+  }
+
   async function startGeneration() {
     if (!session) return;
     setBusy(true);
@@ -606,6 +625,12 @@ export default function Home() {
     URL.revokeObjectURL(href);
   }
 
+  function downloadBundle() {
+    if (!session) return;
+    const query = new URLSearchParams({ assetMode: bundleAssetMode });
+    window.open(`/api/download/${session.id}/bundle?${query.toString()}`, "_blank");
+  }
+
   const assets = session?.assets || [];
   const findings = session?.verificationReport?.findings || [];
   const runActive = runState === "running";
@@ -781,7 +806,17 @@ export default function Home() {
                       <div className="meta">{asset.source}</div>
                       {asset.warning && <div className="meta">{asset.warning}</div>}
                     </div>
-                    <span className={`badge${asset.status === "warning" ? " warn" : ""}`}>{asset.type}</span>
+                    <div className="asset-actions">
+                      <span className={`badge${asset.status === "warning" ? " warn" : ""}`}>{asset.type}</span>
+                      <button
+                        type="button"
+                        onClick={() => void removeAssetById(asset.id)}
+                        disabled={busy || runActive}
+                        aria-label={`Remove ${asset.name}`}
+                      >
+                        Remove
+                      </button>
+                    </div>
                   </div>
                 ))
               ) : (
@@ -900,7 +935,15 @@ export default function Home() {
                   Save
                 </button>
                 <button onClick={downloadCurrentSkill}>Download SKILL.md</button>
-                <button onClick={() => session && window.open(`/api/download/${session.id}/bundle`, "_blank")} disabled={!session}>
+                <select
+                  aria-label="Bundle asset mode"
+                  value={bundleAssetMode}
+                  onChange={(event) => setBundleAssetMode(event.target.value as BundleAssetMode)}
+                >
+                  <option value="reference">Reference assets</option>
+                  <option value="download">Download embedded assets</option>
+                </select>
+                <button onClick={downloadBundle} disabled={!session}>
                   Download Bundle
                 </button>
               </div>

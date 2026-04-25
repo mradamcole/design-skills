@@ -460,7 +460,19 @@ a {
 .asset {
   display: flex;
   justify-content: space-between;
+  align-items: flex-start;
   gap: 12px;
+}
+
+.asset-actions {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+}
+
+.asset-actions button {
+  min-height: 30px;
+  padding: 0 10px;
 }
 
 .badge {

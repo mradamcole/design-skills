@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { fileToAsset, urlToAsset } from "@/lib/assets";
-import { addAsset, getSession } from "@/lib/store";
+import { addAsset, getSession, removeAsset } from "@/lib/store";
 
 export async function POST(request: Request) {
   const contentType = request.headers.get("content-type") || "";
@@ -31,6 +31,29 @@ export async function POST(request: Request) {
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Unable to ingest URL" },
+      { status: 400 }
+    );
+  }
+}
+
+export async function DELETE(request: Request) {
+  const body = (await request.json().catch(() => null)) as { sessionId?: string; assetId?: string } | null;
+  if (!body?.sessionId || !body?.assetId) {
+    return NextResponse.json({ error: "sessionId and assetId are required" }, { status: 400 });
+  }
+  if (!getSession(body.sessionId)) {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+
+  try {
+    const removed = removeAsset(body.sessionId, body.assetId);
+    if (!removed) {
+      return NextResponse.json({ error: "Asset not found" }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Unable to remove asset" },
       { status: 400 }
     );
   }

@@ -19,6 +19,7 @@ const html = `<!doctype html>
     </style>
   </head>
   <body>
+    <img src="/hero.png" />
     <h1>Build polished design skills</h1>
     <p>Extract typography, colors, and interaction guidance.</p>
   </body>
@@ -56,6 +57,7 @@ describe("asset classification", () => {
       ])
     );
     expect(metadata.stylesheets).toContain("https://example.com/styles.css");
+    expect(metadata.images).toContain("https://example.com/hero.png");
   });
 
   it("summarizes typography, color, radius, shadow, and spacing CSS signals", () => {
@@ -86,7 +88,24 @@ describe("asset classification", () => {
         return new Response(html, { headers: { "content-type": "text/html" } });
       }
       if (value === "https://example.com/styles.css") {
-        return new Response(".button { font-weight: 700; color: #f97316; border-radius: 999px; }");
+        return new Response('.button { font-weight: 700; color: #f97316; border-radius: 999px; background-image: url("/bg.png"); }');
+      }
+      if (value === "https://example.com/site.webmanifest") {
+        return new Response(JSON.stringify({ icons: [{ src: "/icon-192.png" }] }), {
+          headers: { "content-type": "application/manifest+json" }
+        });
+      }
+      if (
+        value === "https://example.com/favicon.ico" ||
+        value === "https://example.com/touch.png" ||
+        value === "https://example.com/hero.png" ||
+        value === "https://example.com/og.png" ||
+        value === "https://example.com/bg.png" ||
+        value === "https://example.com/icon-192.png"
+      ) {
+        return new Response(new Uint8Array([1, 2, 3, 4]), {
+          headers: { "content-type": "image/png" }
+        });
       }
       return new Response("", { status: 404 });
     });
@@ -101,5 +120,9 @@ describe("asset classification", () => {
     expect(asset.content).toContain("font-family: Inter, system-ui");
     expect(asset.content).toContain("font-weight: 700");
     expect(asset.content).toContain("Build polished design skills");
+    expect(asset.content).toContain("## Embedded Asset Inventory");
+    expect(asset.embeddedAssets?.some((item) => item.kind === "icon" && item.status === "fetched")).toBe(true);
+    expect(asset.embeddedAssets?.some((item) => item.kind === "manifest" && item.status === "fetched")).toBe(true);
+    expect(asset.embeddedAssets?.some((item) => item.kind === "image" && item.sourceUrl.includes("bg.png"))).toBe(true);
   });
 });

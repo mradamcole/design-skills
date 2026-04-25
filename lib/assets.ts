@@ -1,4 +1,4 @@
-import type { AssetType, DesignAsset } from "./types";
+import type { AssetType, DesignAsset, EmbeddedAsset, EmbeddedAssetKind } from "./types";
 
 const TEXT_MIME_PREFIXES = ["text/"];
 const TEXT_MIME_TYPES = new Set([
@@ -11,6 +11,8 @@ const TEXT_MIME_TYPES = new Set([
 const MAX_TEXT_CHARS = 80_000;
 const MAX_CSS_CHARS = 60_000;
 const MAX_LINKED_STYLESHEETS = 4;
+const MAX_EMBEDDED_ASSETS = 40;
+const MAX_EMBEDDED_BYTES = 3 * 1024 * 1024;
 
 export function classifyAsset(name: string, mimeType: string): AssetType {
   const lowerName = name.toLowerCase();
@@ -87,13 +89,15 @@ export async function urlToAsset(rawUrl: string): Promise<DesignAsset> {
   const inlineCss = extractInlineCss(text);
   const linkedCss = await fetchLinkedStylesheets(text, url);
   const cssSignals = extractCssSignals([inlineCss, linkedCss.css].filter(Boolean).join("\n\n"));
+  const embeddedAssets = await discoverEmbeddedAssets(text, url, metadata, [inlineCss, linkedCss.css].filter(Boolean).join("\n\n"));
   const readableText = extractReadableText(text);
   const content = buildUrlAssetContent({
     source: url.toString(),
     metadata,
     cssSignals,
     readableText,
-    stylesheetWarnings: linkedCss.warnings
+    stylesheetWarnings: linkedCss.warnings,
+    embeddedAssets
   }).slice(0, MAX_TEXT_CHARS);
 
   return {
@@ -103,6 +107,7 @@ export async function urlToAsset(rawUrl: string): Promise<DesignAsset> {
     source: url.toString(),
     mimeType: response.headers.get("content-type") || "text/html",
     content,
+    embeddedAssets,
     status: content ? "ready" : "warning",
     warning: content ? linkedCss.warnings[0] : "The URL was reachable, but no readable page text was extracted."
   };
@@ -117,6 +122,7 @@ export type PageMetadata = {
   manifest?: string;
   icons: Array<{ rel: string; href: string; sizes?: string; type?: string }>;
   stylesheets: string[];
+  images: string[];
 };
 
 export type CssSignals = {
@@ -164,6 +170,11 @@ export function extractPageMetadata(html: string, baseUrl: URL): PageMetadata {
     .filter((attrs) => (attrs.rel || "").toLowerCase().includes("stylesheet") && attrs.href)
     .map((attrs) => resolveAssetUrl(attrs.href, baseUrl))
     .filter((href): href is string => Boolean(href));
+  const images = Array.from(html.matchAll(/<(?:img|source)\b[^>]*\b(?:src|srcset)=["']([^"']+)["']/gi))
+    .map((match) => match[1])
+    .flatMap((value) => value.split(",").map((entry) => entry.trim().split(/\s+/)[0]))
+    .map((value) => resolveAssetUrl(value, baseUrl))
+    .filter((href): href is string => Boolean(href));
 
   return {
     title,
@@ -173,7 +184,8 @@ export function extractPageMetadata(html: string, baseUrl: URL): PageMetadata {
     openGraphImage: resolveOptionalUrl(findMeta("og:image"), baseUrl),
     manifest: resolveOptionalUrl(manifest, baseUrl),
     icons,
-    stylesheets: unique(stylesheets).slice(0, MAX_LINKED_STYLESHEETS)
+    stylesheets: unique(stylesheets).slice(0, MAX_LINKED_STYLESHEETS),
+    images: unique(images).slice(0, MAX_EMBEDDED_ASSETS)
   };
 }
 
@@ -207,13 +219,15 @@ function buildUrlAssetContent({
   metadata,
   cssSignals,
   readableText,
-  stylesheetWarnings
+  stylesheetWarnings,
+  embeddedAssets
 }: {
   source: string;
   metadata: PageMetadata;
   cssSignals: CssSignals;
   readableText: string;
   stylesheetWarnings: string[];
+  embeddedAssets: EmbeddedAsset[];
 }) {
   const lines = [
     "# URL Design Evidence",
@@ -232,7 +246,14 @@ function buildUrlAssetContent({
     "",
     "## Stylesheets",
     ...formatList(metadata.stylesheets),
-    ...formatList(stylesheetWarnings.map((warning) => `Warning: ${warning}`)),
+    ...stylesheetWarnings.map((warning) => `- Warning: ${warning}`),
+    "",
+    "## Embedded Asset Inventory",
+    ...formatList(
+      embeddedAssets.map(
+        (asset) => `${asset.kind}: ${asset.sourceUrl} [${asset.status}]${asset.warning ? ` (${asset.warning})` : ""}`
+      )
+    ),
     "",
     "## Typography Signals",
     ...formatList([
@@ -377,4 +398,145 @@ function decodeHtmlEntity(value: string) {
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, "\"")
     .replace(/&#39;/g, "'");
+}
+
+async function discoverEmbeddedAssets(html: string, baseUrl: URL, metadata: PageMetadata, css: string) {
+  const candidates: Array<{ url: string; kind: EmbeddedAssetKind }> = [];
+  for (const icon of metadata.icons) candidates.push({ url: icon.href, kind: "icon" });
+  for (const image of metadata.images) candidates.push({ url: image, kind: "image" });
+  for (const stylesheet of metadata.stylesheets) candidates.push({ url: stylesheet, kind: "stylesheet" });
+  if (metadata.manifest) candidates.push({ url: metadata.manifest, kind: "manifest" });
+  if (metadata.openGraphImage) candidates.push({ url: metadata.openGraphImage, kind: "image" });
+
+  for (const cssUrl of extractCssUrls(css, baseUrl)) {
+    candidates.push({ url: cssUrl.url, kind: cssUrl.kind });
+  }
+
+  const uniqueCandidates = uniqueAssetCandidates(candidates).slice(0, MAX_EMBEDDED_ASSETS);
+  const assets: EmbeddedAsset[] = [];
+  for (const candidate of uniqueCandidates) {
+    assets.push(await fetchEmbeddedAsset(candidate.url, candidate.kind));
+  }
+
+  const manifestAsset = assets.find((asset) => asset.kind === "manifest" && asset.status === "fetched" && asset.bytesBase64);
+  if (manifestAsset?.bytesBase64) {
+    const manifestIcons = discoverManifestIcons(manifestAsset.bytesBase64, manifestAsset.sourceUrl);
+    for (const icon of manifestIcons) {
+      if (assets.length >= MAX_EMBEDDED_ASSETS) break;
+      if (assets.some((asset) => asset.sourceUrl === icon)) continue;
+      assets.push(await fetchEmbeddedAsset(icon, "icon"));
+    }
+  }
+
+  return assets;
+}
+
+function extractCssUrls(css: string, baseUrl: URL): Array<{ url: string; kind: "image" | "font" }> {
+  const urls = Array.from(css.matchAll(/url\(([^)]+)\)/gi))
+    .map((match) => match[1].trim().replace(/^["']|["']$/g, ""))
+    .filter((value) => value && !value.startsWith("data:"));
+  return urls
+    .map((value) => {
+      const url = resolveAssetUrl(value, baseUrl);
+      if (!url) return undefined;
+      const kind: "image" | "font" = /\.(woff2?|ttf|otf|eot)(?:[?#].*)?$/i.test(value) ? "font" : "image";
+      return {
+        url,
+        kind
+      };
+    })
+    .filter((item): item is { url: string; kind: "image" | "font" } => item !== undefined);
+}
+
+function uniqueAssetCandidates(candidates: Array<{ url: string; kind: EmbeddedAssetKind }>) {
+  const seen = new Set<string>();
+  const uniqueList: Array<{ url: string; kind: EmbeddedAssetKind }> = [];
+  for (const candidate of candidates) {
+    if (!candidate.url || seen.has(candidate.url)) continue;
+    seen.add(candidate.url);
+    uniqueList.push(candidate);
+  }
+  return uniqueList;
+}
+
+async function fetchEmbeddedAsset(url: string, kind: EmbeddedAssetKind): Promise<EmbeddedAsset> {
+  const base: EmbeddedAsset = {
+    id: crypto.randomUUID(),
+    kind,
+    sourceUrl: url,
+    fileName: safeFileNameFromUrl(url, kind),
+    mimeType: "application/octet-stream",
+    fetchedAt: Date.now(),
+    status: "skipped"
+  };
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return { ...base, status: "error", warning: "Invalid asset URL." };
+  }
+  if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+    return { ...base, status: "skipped", warning: "Unsupported protocol." };
+  }
+  try {
+    const response = await fetch(parsedUrl, {
+      headers: { "user-agent": "DesignSkillGenerator/0.1" },
+      signal: AbortSignal.timeout(5_000)
+    });
+    if (!response.ok) {
+      return { ...base, status: "error", warning: `Fetch failed (${response.status}).` };
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const mimeType = response.headers.get("content-type")?.split(";")[0].trim() || inferMimeTypeFromFileName(base.fileName);
+    if (bytes.length > MAX_EMBEDDED_BYTES) {
+      return { ...base, mimeType, status: "skipped", warning: `Asset exceeds ${MAX_EMBEDDED_BYTES} byte limit.` };
+    }
+    return {
+      ...base,
+      mimeType,
+      status: "fetched",
+      bytesBase64: bytes.toString("base64")
+    };
+  } catch {
+    return { ...base, status: "error", warning: "Fetch timed out or failed." };
+  }
+}
+
+function discoverManifestIcons(bytesBase64: string, manifestUrl: string) {
+  try {
+    const parsed = JSON.parse(Buffer.from(bytesBase64, "base64").toString("utf8")) as { icons?: Array<{ src?: string }> };
+    const baseUrl = new URL(manifestUrl);
+    return (parsed.icons || [])
+      .map((icon) => resolveAssetUrl(icon.src, baseUrl))
+      .filter((url): url is string => Boolean(url))
+      .slice(0, 12);
+  } catch {
+    return [];
+  }
+}
+
+function safeFileNameFromUrl(url: string, kind: EmbeddedAssetKind) {
+  try {
+    const parsed = new URL(url);
+    const fromPath = parsed.pathname.split("/").filter(Boolean).pop();
+    return (fromPath || `${kind}.bin`).replace(/[^\w.\-]+/g, "_");
+  } catch {
+    return `${kind}.bin`;
+  }
+}
+
+function inferMimeTypeFromFileName(name: string) {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".css")) return "text/css";
+  if (lower.endsWith(".svg")) return "image/svg+xml";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".ico")) return "image/x-icon";
+  if (lower.endsWith(".woff2")) return "font/woff2";
+  if (lower.endsWith(".woff")) return "font/woff";
+  if (lower.endsWith(".ttf")) return "font/ttf";
+  if (lower.endsWith(".otf")) return "font/otf";
+  if (lower.endsWith(".webmanifest") || lower.endsWith(".json")) return "application/manifest+json";
+  return "application/octet-stream";
 }
