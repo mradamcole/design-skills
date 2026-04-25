@@ -327,24 +327,45 @@ function formatUsage(usage: TokenUsage) {
   return `prompt ${prompt.toLocaleString()} · completion ${completion.toLocaleString()} · total ${total.toLocaleString()}`;
 }
 
-function buildExtractionPrompt(guidance?: string) {
+export function buildExtractionPrompt(guidance?: string) {
   return `You are extracting design-system guidance for a Codex SKILL.md file.
-Return a concise but rich list of observations grouped by:
-visual language, layout, typography, color, components, interaction, accessibility, responsive behavior, avoid rules.
-Prefer enforceable observations over mood words.
+
+Return structured observations with these exact headings:
+Source Inventory
+Brand And Content Voice
+Layout And Composition
+Typography
+Color And Design Tokens
+Icons, Favicons, And Imagery
+Components And Patterns
+Interaction States
+Accessibility
+Responsive Behavior
+Avoid Rules
+Weak Or Uncertain Inferences
+
+Extraction rules:
+- Cite asset names for important observations.
+- Preserve concrete values when present: font families, type sizes, font weights, line heights, color values, CSS custom properties, icon/favicon paths, radii, shadows, spacing, and component states.
+- Distinguish direct evidence from inference. Put guesses under "Weak Or Uncertain Inferences".
+- Prefer enforceable implementation guidance over mood words.
+- Do not use unsupported phrases like "clean", "modern", "beautiful", or "visually appealing" unless the source explicitly says them as content.
 Optional user guidance: ${guidance || "none"}`;
 }
 
-function buildSynthesisPrompt(rawExtraction: string, guidance?: string) {
+export function buildSynthesisPrompt(rawExtraction: string, guidance?: string) {
   return `Turn these raw observations into concrete reusable design rules for a Codex skill.
-Keep source distinctions where useful and mark weak inferences.
+Preserve high-confidence tokens and exact source values where they are useful for implementation.
+Keep source distinctions when references disagree or when a rule only applies to one source.
+Mark weak inferences explicitly and do not promote them into rules unless they are useful with caveats.
+Include coverage for typography, color/tokens, icons/favicon/assets, component anatomy, interaction states, accessibility, and responsive behavior when evidence exists.
 Optional user guidance: ${guidance || "none"}
 
 Raw observations:
 ${rawExtraction}`;
 }
 
-function buildSkillPrompt(synthesis: string, guidance?: string) {
+export function buildSkillPrompt(synthesis: string, guidance?: string) {
   return `Write a complete Codex design SKILL.md.
 Use Markdown. Include exactly these top-level sections:
 # Design System Skill
@@ -356,6 +377,13 @@ Use Markdown. Include exactly these top-level sections:
 ## Examples
 Make rules specific, actionable, and useful to an agent building UI.
 Avoid claims that are not supported by the supplied references.
+Within those required sections, include practical guidance for:
+- Typography: font families, scale, weights, line heights, and text hierarchy when known.
+- Color and tokens: named CSS variables, exact colors, contrast-sensitive pairings, gradients, shadows, radii, and spacing patterns when known.
+- Icons, favicon, and imagery: preferred icon sources, favicon/apple-touch/manifest assets, image treatments, and when not to invent missing assets.
+- Components: anatomy, density, borders, elevation, state styles, and reusable layout patterns.
+- Interaction: hover/focus/active/loading/empty/error states when supported by the evidence.
+- Verification: checks that compare output against concrete values and visible patterns, not generic taste.
 Optional user guidance: ${guidance || "none"}
 
 Synthesized design rules:
@@ -363,7 +391,7 @@ ${synthesis}`;
 }
 
 function buildCritiquePrompt(draft: string) {
-  return `Critique this SKILL.md draft. List only concrete issues: vague rules, contradictions, missing required sections, missing accessibility/responsive guidance, or rules that are not actionable.
+  return `Critique this SKILL.md draft. List only concrete issues: vague rules, contradictions, missing required sections, missing concrete typography/color/icon guidance, missing accessibility/responsive guidance, unsupported claims, or rules that are not actionable.
 
 Draft:
 ${draft}`;

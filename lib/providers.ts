@@ -367,12 +367,20 @@ export function buildAssetPrompt(prompt: string, assets: DesignAsset[]) {
   const assetBlocks = assets
     .map((asset, index) => {
       const body = asset.content || asset.warning || "[visual asset supplied separately if supported]";
+      const evidenceKind =
+        asset.type === "url"
+          ? "structured URL design evidence: page text, metadata, icons/favicons, CSS typography, colors, and tokens"
+          : asset.type === "image"
+            ? "visual reference supplied separately when the provider supports vision"
+            : "uploaded reference content";
+      const contentLimit = asset.type === "url" ? 18_000 : 12_000;
       return `Asset ${index + 1}: ${asset.name}
 Type: ${asset.type}
 Source: ${asset.source}
 Status: ${asset.status}
+Evidence: ${evidenceKind}
 Content:
-${body.slice(0, 12_000)}`;
+${body.slice(0, contentLimit)}`;
     })
     .join("\n\n---\n\n");
   return `${prompt}

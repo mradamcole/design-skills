@@ -39,6 +39,10 @@ Use this skill when generating or reviewing interfaces for this design system.
 export default function Home() {
   type RunState = "idle" | "running" | "complete" | "error";
   type OpenAIModelOption = { id: string; label: string; approxCostPer1M?: number };
+  type UiLogEntry =
+    | { id: string; kind: "event"; event: ProgressEvent }
+    | { id: string; kind: "summary"; summary: { durationMs: number; usage?: TokenUsage; endedAt: number } }
+    | { id: string; kind: "boundary"; label: string; startedAt: number };
   const [session, setSession] = useState<GenerationSession | null>(null);
   const [activeTab, setActiveTab] = useState<"edit" | "sample" | "verify">("edit");
   const [providerKind, setProviderKind] = useState<ProviderKind>("openai");
@@ -57,7 +61,7 @@ export default function Home() {
   const [skillMarkdown, setSkillMarkdown] = useState(defaultSkill);
   const [existingSkill, setExistingSkill] = useState(defaultSkill);
   const [sampleHtml, setSampleHtml] = useState("");
-  const [progress, setProgress] = useState<ProgressEvent[]>([]);
+  const [uiLog, setUiLog] = useState<UiLogEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [runState, setRunState] = useState<RunState>("idle");
@@ -73,12 +77,16 @@ export default function Home() {
   const [reasoningAvailable, setReasoningAvailable] = useState(false);
   const [tokenTotals, setTokenTotals] = useState<TokenUsage>({});
   const [stepTokenUsage, setStepTokenUsage] = useState<Record<string, TokenUsage>>({});
+  const [lastRunSummary, setLastRunSummary] = useState<{ durationMs: number; usage?: TokenUsage; endedAt: number } | null>(null);
   const [streamPhase, setStreamPhase] = useState("Waiting to start.");
   const [lastLoadDurationMs, setLastLoadDurationMs] = useState<number | null>(null);
   const [memoryReady, setMemoryReady] = useState(false);
   const [sampleSyncStatus, setSampleSyncStatus] = useState<"empty" | "synced" | "stale" | "refreshing" | "error">("empty");
   const [lastSampleMarkdown, setLastSampleMarkdown] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const logRef = useRef<HTMLDivElement>(null);
+  const streamRef = useRef<HTMLDivElement>(null);
+  const reasoningRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void loadSettingsMemory();
@@ -237,6 +245,18 @@ export default function Home() {
     };
   }, [runState]);
 
+  useEffect(() => {
+    scrollToBottom(logRef.current);
+  }, [uiLog]);
+
+  useEffect(() => {
+    scrollToBottom(streamRef.current);
+  }, [streamContent]);
+
+  useEffect(() => {
+    scrollToBottom(reasoningRef.current);
+  }, [reasoningContent]);
+
   const providerConfig = useMemo<ProviderConfig>(
     () => ({
       kind: providerKind,
@@ -257,7 +277,8 @@ export default function Home() {
     });
     const data = (await response.json()) as { session: GenerationSession };
     setSession(data.session);
-    setProgress([]);
+    setUiLog([]);
+    setLastRunSummary(null);
     if (mode === "generate") {
       setSkillMarkdown(defaultSkill);
       setSampleHtml("");
@@ -360,7 +381,6 @@ export default function Home() {
   async function startGeneration() {
     if (!session) return;
     setBusy(true);
-    setProgress([]);
     setNotice("");
     startRun("generate");
     const response = await fetch("/api/generate", {
@@ -380,7 +400,6 @@ export default function Home() {
   async function startVerification() {
     if (!session) return;
     setBusy(true);
-    setProgress([]);
     setNotice("");
     startRun("verify");
     const response = await fetch("/api/verify", {
@@ -402,7 +421,7 @@ export default function Home() {
     events.addEventListener("progress", (event) => {
       const parsedEvent = JSON.parse((event as MessageEvent).data) as ProgressEvent;
       if (isTimelineEvent(parsedEvent)) {
-        setProgress((current) => [...current, parsedEvent]);
+        setUiLog((current) => [...current, { id: parsedEvent.id, kind: "event", event: parsedEvent }]);
       }
       setCurrentStage(parsedEvent.type);
       if (parsedEvent.streamKind !== "content" && parsedEvent.streamKind !== "reasoning" && parsedEvent.streamKind !== "usage") {
@@ -476,6 +495,24 @@ export default function Home() {
 
   function startRun(mode: "generate" | "verify") {
     const now = Date.now();
+    setUiLog((current) => {
+      const next = [...current];
+      if (lastRunSummary) {
+        next.push({
+          id: crypto.randomUUID(),
+          kind: "summary",
+          summary: lastRunSummary
+        });
+      }
+      next.push({
+        id: crypto.randomUUID(),
+        kind: "boundary",
+        label: `New ${mode === "verify" ? "verification" : "generation"} session`,
+        startedAt: now
+      });
+      return next;
+    });
+    setLastRunSummary(null);
     setRunState("running");
     setRunMode(mode);
     setRunStartedAt(now);
@@ -500,6 +537,13 @@ export default function Home() {
     setLastMessage(message);
     setLastEventAt(now);
     setClockNow(now);
+    if (runStartedAt) {
+      setLastRunSummary({
+        durationMs: Math.max(0, now - runStartedAt),
+        usage: tokenTotals,
+        endedAt: now
+      });
+    }
   }
 
   async function saveSkillToSession() {
@@ -784,14 +828,27 @@ export default function Home() {
               </div>
             </div>
             <div className="event-list">
-              {progress.length ? (
-                <div className="event-log" role="log" aria-live="polite">
-                  {progress.map((event) => (
-                    <div className="event-log-line" key={event.id}>
-                      <span className="event-log-time">{new Date(event.timestamp).toLocaleTimeString()}</span>
-                      <span className="event-log-type">{event.type}</span>
-                      <span className="event-log-message">{event.message}</span>
-                    </div>
+              {uiLog.length ? (
+                <div className="event-log" role="log" aria-live="polite" ref={logRef}>
+                  {uiLog.map((entry) => (
+                    entry.kind === "event" ? (
+                      <div className="event-log-line" key={entry.id}>
+                        <span className="event-log-time">{new Date(entry.event.timestamp).toLocaleTimeString()}</span>
+                        <span className="event-log-type">{entry.event.type}</span>
+                        <span className="event-log-message">{entry.event.message}</span>
+                      </div>
+                    ) : entry.kind === "summary" ? (
+                      <div className="event-log-summary" key={entry.id}>
+                        Previous run · {formatDurationMs(entry.summary.durationMs)} · {formatTokenUsage(entry.summary.usage)}
+                      </div>
+                    ) : (
+                      <div className="event-log-boundary" key={entry.id}>
+                        <div className="event-log-boundary-banner">{entry.label}</div>
+                        <div className="event-log-boundary-rule">
+                          <span>{new Date(entry.startedAt).toLocaleTimeString()}</span>
+                        </div>
+                      </div>
+                    )
                   ))}
                 </div>
               ) : (
@@ -805,7 +862,9 @@ export default function Home() {
                 {streamPhase}
                 {typeof lastLoadDurationMs === "number" ? ` (model load ${formatDurationMs(lastLoadDurationMs)})` : ""}
               </div>
-              <div className="stream-console">{streamContent || "Output stream will appear here while the model is generating."}</div>
+              <div className="stream-console" ref={streamRef}>
+                {streamContent || "Output stream will appear here while the model is generating."}
+              </div>
               <div className="token-row">
                 <span className="token-chip">Step: {formatTokenUsage(currentStepUsage)}</span>
                 <span className="token-chip">Total: {formatTokenUsage(tokenTotals)}</span>
@@ -815,7 +874,7 @@ export default function Home() {
                   ? "Reasoning stream is shown because this provider/model is exposing it."
                   : "Reasoning stream not exposed by provider/model."}
               </div>
-              <div className="reasoning-console">{reasoningContent || "No reasoning chunks received."}</div>
+              <div className="reasoning-console" ref={reasoningRef}>{reasoningContent || "No reasoning chunks received."}</div>
             </div>
             {notice && <div className="quality-note">{notice}</div>}
           </section>
@@ -1030,6 +1089,11 @@ function formatDurationMs(totalMs: number) {
   const minutes = Math.floor(seconds / 60);
   const remain = Math.round(seconds % 60);
   return `${minutes}m ${remain}s`;
+}
+
+function scrollToBottom(element: HTMLDivElement | null) {
+  if (!element) return;
+  element.scrollTop = element.scrollHeight;
 }
 
 function renderMarkdown(markdown: string) {
