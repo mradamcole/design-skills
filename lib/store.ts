@@ -1,13 +1,47 @@
-import type { DesignAsset, GenerationSession, ProgressEvent, ProviderConfig, SessionMode } from "./types";
+import type {
+  DesignAsset,
+  GenerationSession,
+  ProgressEvent,
+  ProviderConfig,
+  SessionMode,
+  UserSettingsMemory
+} from "./types";
 
 type StoreShape = {
   sessions: Map<string, GenerationSession>;
+  settingsMemory: UserSettingsMemory;
 };
 
-const globalStore = globalThis as typeof globalThis & { __designSkillStore?: StoreShape };
+const globalStore = globalThis as typeof globalThis & { __designSkillStore?: Partial<StoreShape> };
 
-export const store: StoreShape = globalStore.__designSkillStore ?? {
-  sessions: new Map()
+const defaultSettingsMemory: UserSettingsMemory = {
+  providerKind: "openai",
+  model: "gpt-4o-mini",
+  apiKey: "",
+  baseUrl: "http://localhost:11434",
+  guidance: "",
+  existingSkill: "",
+  assets: []
+};
+
+function ensureSettingsMemory(value: Partial<UserSettingsMemory> | undefined): UserSettingsMemory {
+  return {
+    ...defaultSettingsMemory,
+    ...(value || {}),
+    assets: Array.isArray(value?.assets) ? value.assets : []
+  };
+}
+
+function cloneAsset(asset: DesignAsset): DesignAsset {
+  return {
+    ...asset,
+    id: crypto.randomUUID()
+  };
+}
+
+export const store: StoreShape = {
+  sessions: globalStore.__designSkillStore?.sessions ?? new Map(),
+  settingsMemory: ensureSettingsMemory(globalStore.__designSkillStore?.settingsMemory)
 };
 
 globalStore.__designSkillStore = store;
@@ -17,7 +51,7 @@ export function createSession(mode: SessionMode = "generate") {
   const session: GenerationSession = {
     id: crypto.randomUUID(),
     mode,
-    assets: [],
+    assets: store.settingsMemory.assets.map(cloneAsset),
     progressEvents: [],
     status: "idle",
     createdAt: now,
@@ -46,6 +80,7 @@ export function addAsset(sessionId: string, asset: DesignAsset) {
     throw new Error("Session not found");
   }
   session.assets.push(asset);
+  store.settingsMemory.assets.push({ ...asset });
   session.updatedAt = Date.now();
   return asset;
 }
@@ -66,4 +101,19 @@ export function addProgress(sessionId: string, type: ProgressEvent["type"], mess
 
 export function setProvider(sessionId: string, providerConfig: ProviderConfig, guidance?: string) {
   return updateSession(sessionId, { providerConfig, guidance });
+}
+
+export function getSettingsMemory() {
+  return { ...store.settingsMemory };
+}
+
+export function updateSettingsMemory(patch: Partial<UserSettingsMemory>) {
+  const nextPatch = patch && typeof patch === "object" ? patch : {};
+  Object.assign(store.settingsMemory, nextPatch);
+  return getSettingsMemory();
+}
+
+export function clearSettingsMemory() {
+  store.settingsMemory = { ...defaultSettingsMemory };
+  return getSettingsMemory();
 }

@@ -7,6 +7,7 @@ import type {
   ProgressEvent,
   ProviderConfig,
   ProviderKind,
+  UserSettingsMemory,
   VerificationFinding
 } from "@/lib/types";
 
@@ -34,12 +35,16 @@ Use this skill when generating or reviewing interfaces for this design system.
 `;
 
 export default function Home() {
+  type RunState = "idle" | "running" | "complete" | "error";
   const [session, setSession] = useState<GenerationSession | null>(null);
   const [activeTab, setActiveTab] = useState<"edit" | "sample" | "verify">("edit");
   const [providerKind, setProviderKind] = useState<ProviderKind>("openai");
   const [model, setModel] = useState("gpt-4o-mini");
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("http://localhost:11434");
+  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState("");
   const [guidance, setGuidance] = useState("");
   const [url, setUrl] = useState("");
   const [dragging, setDragging] = useState(false);
@@ -49,9 +54,18 @@ export default function Home() {
   const [progress, setProgress] = useState<ProgressEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [runState, setRunState] = useState<RunState>("idle");
+  const [runMode, setRunMode] = useState<"generate" | "verify" | null>(null);
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [lastEventAt, setLastEventAt] = useState<number | null>(null);
+  const [currentStage, setCurrentStage] = useState<ProgressEvent["type"] | null>(null);
+  const [lastMessage, setLastMessage] = useState("");
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  const [memoryReady, setMemoryReady] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    void loadSettingsMemory();
     void createSession("generate");
   }, []);
 
@@ -59,6 +73,91 @@ export default function Home() {
     if (providerKind === "openai" && model === "llama3.2-vision") setModel("gpt-4o-mini");
     if (providerKind === "ollama" && model === "gpt-4o-mini") setModel("llama3.2-vision");
   }, [providerKind, model]);
+
+  useEffect(() => {
+    if (!memoryReady) return;
+    const timeoutId = window.setTimeout(() => {
+      void fetch("/api/memory", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          providerKind,
+          model,
+          apiKey,
+          baseUrl,
+          guidance,
+          existingSkill
+        } satisfies Partial<UserSettingsMemory>)
+      });
+    }, 300);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [apiKey, baseUrl, existingSkill, guidance, memoryReady, model, providerKind]);
+
+  useEffect(() => {
+    if (providerKind !== "ollama") {
+      setModelsLoading(false);
+      setModelsError("");
+      return;
+    }
+
+    const controller = new AbortController();
+    let isActive = true;
+
+    async function fetchOllamaModels() {
+      setModelsLoading(true);
+      setModelsError("");
+      const response = await fetch(`/api/ollama/models?baseUrl=${encodeURIComponent(baseUrl)}`, {
+        signal: controller.signal
+      }).catch(() => null);
+      if (!isActive) return;
+
+      if (!response) {
+        setOllamaModels([]);
+        setModelsError("Unable to load models from Ollama.");
+        setModelsLoading(false);
+        return;
+      }
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        setOllamaModels([]);
+        setModelsError(data.error || "Unable to load models from Ollama.");
+        setModelsLoading(false);
+        return;
+      }
+
+      const data = (await response.json()) as { models?: string[] };
+      const nextModels = data.models || [];
+      setOllamaModels(nextModels);
+      setModelsError("");
+      setModel((current) => {
+        if (!nextModels.length) return current;
+        return nextModels.includes(current) ? current : nextModels[0];
+      });
+      setModelsLoading(false);
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void fetchOllamaModels();
+    }, 350);
+
+    return () => {
+      isActive = false;
+      window.clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [baseUrl, providerKind]);
+
+  useEffect(() => {
+    if (runState !== "running") return;
+    const intervalId = window.setInterval(() => setClockNow(Date.now()), 1000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [runState]);
 
   const providerConfig = useMemo<ProviderConfig>(
     () => ({
@@ -92,17 +191,56 @@ export default function Home() {
       setSkillMarkdown(defaultSkill);
       setSampleHtml("");
     }
+    setRunState("idle");
+    setRunMode(null);
+    setRunStartedAt(null);
+    setLastEventAt(null);
+    setCurrentStage(null);
+    setLastMessage("");
     setBusy(false);
+  }
+
+  async function loadSettingsMemory() {
+    const response = await fetch("/api/memory").catch(() => null);
+    if (!response?.ok) {
+      setMemoryReady(true);
+      return;
+    }
+    const data = (await response.json()) as { memory?: UserSettingsMemory };
+    const memory = data.memory;
+    if (memory) {
+      setProviderKind(memory.providerKind || "openai");
+      setModel(memory.model || "gpt-4o-mini");
+      setApiKey(memory.apiKey || "");
+      setBaseUrl(memory.baseUrl || "http://localhost:11434");
+      setGuidance(memory.guidance || "");
+      setExistingSkill(memory.existingSkill || defaultSkill);
+    }
+    setMemoryReady(true);
+  }
+
+  async function resetWorkspace() {
+    setBusy(true);
+    setNotice("");
+    await fetch("/api/memory", { method: "DELETE" });
+    setProviderKind("openai");
+    setModel("gpt-4o-mini");
+    setApiKey("");
+    setBaseUrl("http://localhost:11434");
+    setGuidance("");
+    setExistingSkill(defaultSkill);
+    await createSession("generate");
   }
 
   async function refreshSession(sessionId = session?.id) {
     if (!sessionId) return;
     const response = await fetch(`/api/sessions/${sessionId}`);
-    if (!response.ok) return;
+    if (!response.ok) return null;
     const data = (await response.json()) as { session: GenerationSession };
     setSession(data.session);
     if (data.session.skillDraft?.markdown) setSkillMarkdown(data.session.skillDraft.markdown);
     if (data.session.sampleHtml) setSampleHtml(data.session.sampleHtml);
+    return data.session;
   }
 
   async function uploadFiles(files: FileList | File[]) {
@@ -145,6 +283,7 @@ export default function Home() {
     setBusy(true);
     setProgress([]);
     setNotice("");
+    startRun("generate");
     const response = await fetch("/api/generate", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -152,6 +291,7 @@ export default function Home() {
     });
     setBusy(false);
     if (!response.ok) {
+      finishRun("error", "error", "Unable to start generation.");
       setNotice(await response.text());
       return;
     }
@@ -163,6 +303,7 @@ export default function Home() {
     setBusy(true);
     setProgress([]);
     setNotice("");
+    startRun("verify");
     const response = await fetch("/api/verify", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -170,6 +311,7 @@ export default function Home() {
     });
     setBusy(false);
     if (!response.ok) {
+      finishRun("error", "error", "Unable to start verification.");
       setNotice(await response.text());
       return;
     }
@@ -179,7 +321,11 @@ export default function Home() {
   function attachProgressStream(sessionId: string) {
     const events = new EventSource(`/api/progress/${sessionId}`);
     events.addEventListener("progress", (event) => {
-      setProgress((current) => [...current, JSON.parse((event as MessageEvent).data) as ProgressEvent]);
+      const parsedEvent = JSON.parse((event as MessageEvent).data) as ProgressEvent;
+      setProgress((current) => [...current, parsedEvent]);
+      setCurrentStage(parsedEvent.type);
+      setLastMessage(parsedEvent.message);
+      setLastEventAt(parsedEvent.timestamp);
     });
     events.addEventListener("session", (event) => {
       const nextSession = JSON.parse((event as MessageEvent).data) as GenerationSession;
@@ -187,12 +333,48 @@ export default function Home() {
       if (nextSession.skillDraft?.markdown) setSkillMarkdown(nextSession.skillDraft.markdown);
       if (nextSession.sampleHtml) setSampleHtml(nextSession.sampleHtml);
       setBusy(false);
+      if (nextSession.status === "error") {
+        finishRun("error", "error", nextSession.error || "The run ended with an error.");
+      } else {
+        finishRun("complete", "complete", "Run complete. Outputs are ready.");
+      }
       events.close();
     });
     events.onerror = () => {
       events.close();
-      void refreshSession(sessionId);
+      void (async () => {
+        const refreshed = await refreshSession(sessionId);
+        if (refreshed?.status === "error") {
+          finishRun("error", "error", refreshed.error || "The run ended with an error.");
+          return;
+        }
+        if (refreshed?.status === "complete") {
+          finishRun("complete", "complete", "Run complete. Outputs are ready.");
+          return;
+        }
+        finishRun("error", "error", "Lost progress connection before completion.");
+      })();
     };
+  }
+
+  function startRun(mode: "generate" | "verify") {
+    const now = Date.now();
+    setRunState("running");
+    setRunMode(mode);
+    setRunStartedAt(now);
+    setLastEventAt(now);
+    setCurrentStage("queued");
+    setLastMessage(mode === "generate" ? "Starting skill generation..." : "Starting skill verification...");
+    setClockNow(now);
+  }
+
+  function finishRun(nextState: Exclude<RunState, "idle" | "running">, stage: ProgressEvent["type"], message: string) {
+    const now = Date.now();
+    setRunState(nextState);
+    setCurrentStage(stage);
+    setLastMessage(message);
+    setLastEventAt(now);
+    setClockNow(now);
   }
 
   async function saveSkillToSession() {
@@ -253,6 +435,10 @@ export default function Home() {
 
   const assets = session?.assets || [];
   const findings = session?.verificationReport?.findings || [];
+  const runActive = runState === "running";
+  const elapsedSeconds = runStartedAt ? Math.max(0, Math.floor((clockNow - runStartedAt) / 1000)) : 0;
+  const secondsSinceEvent = lastEventAt ? Math.max(0, Math.floor((clockNow - lastEventAt) / 1000)) : 0;
+  const statusClass = runState === "running" ? "running" : runState === "error" ? "error" : runState === "complete" ? "complete" : "idle";
 
   return (
     <main className="app-shell">
@@ -263,10 +449,10 @@ export default function Home() {
             <span>Local web app for distilling design references into reusable Codex skills</span>
           </div>
           <div className="row">
-            <button onClick={() => void createSession("generate")} disabled={busy}>
+            <button onClick={() => void resetWorkspace()} disabled={busy || runActive}>
               Reset
             </button>
-            <button className="primary" onClick={startGeneration} disabled={busy || !session || !assets.length}>
+            <button className="primary" onClick={startGeneration} disabled={busy || runActive || !session || !assets.length}>
               Generate Skill
             </button>
           </div>
@@ -286,7 +472,30 @@ export default function Home() {
             </div>
             <div className="field">
               <label htmlFor="model">Model</label>
-              <input id="model" value={model} onChange={(event) => setModel(event.target.value)} />
+              {providerKind === "ollama" ? (
+                <select
+                  id="model"
+                  value={model}
+                  onChange={(event) => setModel(event.target.value)}
+                  disabled={modelsLoading || !ollamaModels.length}
+                >
+                  {ollamaModels.length ? (
+                    ollamaModels.map((ollamaModel) => (
+                      <option key={ollamaModel} value={ollamaModel}>
+                        {ollamaModel}
+                      </option>
+                    ))
+                  ) : (
+                    <option value={model}>{modelsLoading ? "Loading models..." : "No models found"}</option>
+                  )}
+                </select>
+              ) : (
+                <input id="model" value={model} onChange={(event) => setModel(event.target.value)} />
+              )}
+              {providerKind === "ollama" && modelsError && <div className="disclosure hint">{modelsError}</div>}
+              {providerKind === "ollama" && !modelsLoading && !modelsError && !ollamaModels.length && (
+                <div className="disclosure hint">No models were returned by Ollama. Pull a model and try again.</div>
+              )}
             </div>
             {providerKind === "openai" ? (
               <div className="field">
@@ -344,7 +553,7 @@ export default function Home() {
             </div>
             <form className="row" onSubmit={addUrl}>
               <input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com/style-guide" />
-              <button type="submit" disabled={busy || !url.trim()}>
+              <button type="submit" disabled={busy || runActive || !url.trim()}>
                 Add URL
               </button>
             </form>
@@ -380,6 +589,25 @@ export default function Home() {
 
           <section className="stack">
             <div className="section-title">Progress</div>
+            <div className={`run-status ${statusClass}`} aria-live="polite">
+              <div className="run-status-head">
+                <span className={`status-pill ${statusClass}`}>
+                  {runState === "running"
+                    ? `Running ${runMode === "verify" ? "verification" : "generation"}`
+                    : runState === "complete"
+                      ? "Run completed"
+                      : runState === "error"
+                        ? "Run failed"
+                        : "Idle"}
+                </span>
+                {runActive && <span className="status-pulse" aria-hidden />}
+              </div>
+              <div className="run-stage">{labelForProgressType(currentStage)}{lastMessage ? ` - ${lastMessage}` : ""}</div>
+              <div className="run-meta">
+                {runStartedAt ? `Elapsed ${formatDuration(elapsedSeconds)}` : "Waiting to start"}
+                {lastEventAt ? ` · last update ${secondsSinceEvent}s ago` : ""}
+              </div>
+            </div>
             <div className="event-list">
               {progress.length ? (
                 progress.map((event) => (
@@ -421,7 +649,7 @@ export default function Home() {
                 <button onClick={() => session && window.open(`/api/download/${session.id}/bundle`, "_blank")} disabled={!session}>
                   Download Bundle
                 </button>
-                <button onClick={regenerateSample} disabled={busy || !session}>
+                <button onClick={regenerateSample} disabled={busy || runActive || !session}>
                   Regenerate Sample
                 </button>
               </div>
@@ -475,7 +703,7 @@ export default function Home() {
           {activeTab === "sample" && (
             <div className="panel-body stack">
               <div className="row">
-                <button onClick={regenerateSample} disabled={busy || !session}>
+                <button onClick={regenerateSample} disabled={busy || runActive || !session}>
                   Regenerate Sample
                 </button>
               </div>
@@ -492,7 +720,7 @@ export default function Home() {
               <div className="verify-card">
                 <header>
                   <strong>Verify / Update Mode</strong>
-                  <button className="primary" onClick={startVerification} disabled={busy || !session || !assets.length}>
+                  <button className="primary" onClick={startVerification} disabled={busy || runActive || !session || !assets.length}>
                     Run Verification
                   </button>
                 </header>
@@ -557,6 +785,27 @@ function labelForFinding(category: VerificationFinding["category"]) {
   if (category === "conflict") return "Conflict";
   if (category === "unvalidated") return "Unvalidated";
   return "Match";
+}
+
+function labelForProgressType(type: ProgressEvent["type"] | null) {
+  if (!type) return "No run activity yet.";
+  if (type === "queued") return "Queued";
+  if (type === "ingesting_asset") return "Preparing assets";
+  if (type === "extracting_design_signals") return "Extracting design signals";
+  if (type === "synthesizing_rules") return "Synthesizing design rules";
+  if (type === "drafting_skill") return "Drafting SKILL.md";
+  if (type === "critiquing_skill") return "Reviewing and tightening the draft";
+  if (type === "generating_sample") return "Generating sample UI";
+  if (type === "complete") return "Completed";
+  if (type === "warning") return "Warning";
+  return "Error";
+}
+
+function formatDuration(totalSeconds: number) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (!minutes) return `${seconds}s`;
+  return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
 }
 
 function renderMarkdown(markdown: string) {

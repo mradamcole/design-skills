@@ -14,32 +14,58 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
   const stream = new ReadableStream({
     start(controller) {
       let closed = false;
+      let interval: ReturnType<typeof setInterval> | undefined;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+
+      const closeStream = () => {
+        if (closed) return;
+        closed = true;
+        if (interval) clearInterval(interval);
+        if (timeout) clearTimeout(timeout);
+        try {
+          controller.close();
+        } catch {
+          // Stream may already be closed by the runtime when client disconnects.
+        }
+      };
+
+      const enqueue = (payload: string) => {
+        if (closed) return false;
+        try {
+          controller.enqueue(encoder.encode(payload));
+          return true;
+        } catch {
+          closeStream();
+          return false;
+        }
+      };
+
       const send = () => {
         if (closed) return;
         const session = getSession(sessionId);
         if (!session) {
-          closed = true;
-          controller.close();
+          closeStream();
           return;
         }
         const events = session.progressEvents.slice(cursor);
         cursor = session.progressEvents.length;
         for (const event of events) {
-          controller.enqueue(encoder.encode(`event: progress\ndata: ${JSON.stringify(event)}\n\n`));
+          const didEnqueue = enqueue(`event: progress\ndata: ${JSON.stringify(event)}\n\n`);
+          if (!didEnqueue) return;
         }
         if (session.status === "complete" || session.status === "error") {
-          controller.enqueue(encoder.encode(`event: session\ndata: ${JSON.stringify(session)}\n\n`));
-          closed = true;
-          clearInterval(interval);
-          controller.close();
+          enqueue(`event: session\ndata: ${JSON.stringify(session)}\n\n`);
+          closeStream();
         }
       };
-      const interval = setInterval(send, 500);
+      interval = setInterval(send, 500);
       send();
-      setTimeout(() => {
-        closed = true;
-        clearInterval(interval);
+      timeout = setTimeout(() => {
+        closeStream();
       }, 1000 * 60 * 10);
+    },
+    cancel() {
+      // Client disconnected; stream cleanup is handled by guarded enqueue/close logic.
     }
   });
 

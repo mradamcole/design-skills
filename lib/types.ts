@@ -25,6 +25,16 @@ export interface ProviderConfig {
   baseUrl?: string;
 }
 
+export interface UserSettingsMemory {
+  providerKind: ProviderKind;
+  model: string;
+  apiKey: string;
+  baseUrl: string;
+  guidance: string;
+  existingSkill: string;
+  assets: DesignAsset[];
+}
+
 export interface DesignAsset {
   id: string;
   type: AssetType;
