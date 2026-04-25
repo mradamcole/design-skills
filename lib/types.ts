@@ -18,6 +18,23 @@ export type ProgressType =
   | "warning"
   | "error";
 
+export type ProgressStepId =
+  | "extract_observations"
+  | "synthesize_rules"
+  | "draft_skill"
+  | "critique_skill"
+  | "revise_skill"
+  | "generate_sample"
+  | "verify_skill";
+
+export type StreamKind = "content" | "reasoning" | "usage" | "status" | "step_complete" | "summary";
+
+export interface TokenUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+}
+
 export interface ProviderConfig {
   kind: ProviderKind;
   model: string;
@@ -52,6 +69,20 @@ export interface ProgressEvent {
   type: ProgressType;
   message: string;
   timestamp: number;
+  stepId?: ProgressStepId;
+  streamKind?: StreamKind;
+  textDelta?: string;
+  tokenUsage?: TokenUsage;
+  providerMeta?: {
+    provider?: ProviderKind;
+    model?: string;
+    reasoningExposed?: boolean;
+    usageIsFinal?: boolean;
+    streamStatus?: "waiting_for_first_chunk" | "first_chunk_received";
+    modelResident?: boolean;
+    loadDurationMs?: number;
+    latencyMs?: number;
+  };
 }
 
 export interface SourceObservation {

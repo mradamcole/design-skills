@@ -4,9 +4,11 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type {
   DesignAsset,
   GenerationSession,
+  ProgressStepId,
   ProgressEvent,
   ProviderConfig,
   ProviderKind,
+  TokenUsage,
   UserSettingsMemory,
   VerificationFinding
 } from "@/lib/types";
@@ -36,12 +38,16 @@ Use this skill when generating or reviewing interfaces for this design system.
 
 export default function Home() {
   type RunState = "idle" | "running" | "complete" | "error";
+  type OpenAIModelOption = { id: string; label: string; approxCostPer1M?: number };
   const [session, setSession] = useState<GenerationSession | null>(null);
   const [activeTab, setActiveTab] = useState<"edit" | "sample" | "verify">("edit");
   const [providerKind, setProviderKind] = useState<ProviderKind>("openai");
   const [model, setModel] = useState("gpt-4o-mini");
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("http://localhost:11434");
+  const [openaiModels, setOpenaiModels] = useState<OpenAIModelOption[]>([]);
+  const [openaiModelsLoading, setOpenaiModelsLoading] = useState(false);
+  const [openaiModelsError, setOpenaiModelsError] = useState("");
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState("");
@@ -61,7 +67,17 @@ export default function Home() {
   const [currentStage, setCurrentStage] = useState<ProgressEvent["type"] | null>(null);
   const [lastMessage, setLastMessage] = useState("");
   const [clockNow, setClockNow] = useState(() => Date.now());
+  const [streamStepId, setStreamStepId] = useState<ProgressStepId | null>(null);
+  const [streamContent, setStreamContent] = useState("");
+  const [reasoningContent, setReasoningContent] = useState("");
+  const [reasoningAvailable, setReasoningAvailable] = useState(false);
+  const [tokenTotals, setTokenTotals] = useState<TokenUsage>({});
+  const [stepTokenUsage, setStepTokenUsage] = useState<Record<string, TokenUsage>>({});
+  const [streamPhase, setStreamPhase] = useState("Waiting to start.");
+  const [lastLoadDurationMs, setLastLoadDurationMs] = useState<number | null>(null);
   const [memoryReady, setMemoryReady] = useState(false);
+  const [sampleSyncStatus, setSampleSyncStatus] = useState<"empty" | "synced" | "stale" | "refreshing" | "error">("empty");
+  const [lastSampleMarkdown, setLastSampleMarkdown] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -95,6 +111,68 @@ export default function Home() {
       window.clearTimeout(timeoutId);
     };
   }, [apiKey, baseUrl, existingSkill, guidance, memoryReady, model, providerKind]);
+
+  useEffect(() => {
+    if (providerKind !== "openai") {
+      setOpenaiModelsLoading(false);
+      setOpenaiModelsError("");
+      return;
+    }
+
+    if (!apiKey.trim()) {
+      setOpenaiModels([]);
+      setOpenaiModelsLoading(false);
+      setOpenaiModelsError("");
+      return;
+    }
+
+    const controller = new AbortController();
+    let isActive = true;
+
+    async function fetchOpenAIModels() {
+      setOpenaiModelsLoading(true);
+      setOpenaiModelsError("");
+      const response = await fetch(`/api/openai/models?apiKey=${encodeURIComponent(apiKey)}`, {
+        signal: controller.signal
+      }).catch(() => null);
+      if (!isActive) return;
+
+      if (!response) {
+        setOpenaiModels([]);
+        setOpenaiModelsError("Unable to load models from OpenAI.");
+        setOpenaiModelsLoading(false);
+        return;
+      }
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        setOpenaiModels([]);
+        setOpenaiModelsError(data.error || "Unable to load models from OpenAI.");
+        setOpenaiModelsLoading(false);
+        return;
+      }
+
+      const data = (await response.json()) as { models?: OpenAIModelOption[] };
+      const nextModels = data.models || [];
+      setOpenaiModels(nextModels);
+      setOpenaiModelsError("");
+      setModel((current) => {
+        if (!nextModels.length) return current;
+        return nextModels.some((option) => option.id === current) ? current : nextModels[0].id;
+      });
+      setOpenaiModelsLoading(false);
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void fetchOpenAIModels();
+    }, 350);
+
+    return () => {
+      isActive = false;
+      window.clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [apiKey, providerKind]);
 
   useEffect(() => {
     if (providerKind !== "ollama") {
@@ -169,13 +247,6 @@ export default function Home() {
     [apiKey, baseUrl, model, providerKind]
   );
 
-  const headings = useMemo(() => {
-    return skillMarkdown
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith("## "))
-      .map((line) => line.replace(/^##\s+/, ""));
-  }, [skillMarkdown]);
-
   async function createSession(mode: "generate" | "verify") {
     setBusy(true);
     setNotice("");
@@ -190,6 +261,8 @@ export default function Home() {
     if (mode === "generate") {
       setSkillMarkdown(defaultSkill);
       setSampleHtml("");
+      setLastSampleMarkdown("");
+      setSampleSyncStatus("empty");
     }
     setRunState("idle");
     setRunMode(null);
@@ -197,6 +270,14 @@ export default function Home() {
     setLastEventAt(null);
     setCurrentStage(null);
     setLastMessage("");
+    setStreamStepId(null);
+    setStreamContent("");
+    setReasoningContent("");
+    setReasoningAvailable(false);
+    setTokenTotals({});
+    setStepTokenUsage({});
+    setStreamPhase("Waiting to start.");
+    setLastLoadDurationMs(null);
     setBusy(false);
   }
 
@@ -219,17 +300,8 @@ export default function Home() {
     setMemoryReady(true);
   }
 
-  async function resetWorkspace() {
-    setBusy(true);
-    setNotice("");
-    await fetch("/api/memory", { method: "DELETE" });
-    setProviderKind("openai");
-    setModel("gpt-4o-mini");
-    setApiKey("");
-    setBaseUrl("http://localhost:11434");
-    setGuidance("");
-    setExistingSkill(defaultSkill);
-    await createSession("generate");
+  function resetWorkspace() {
+    window.location.reload();
   }
 
   async function refreshSession(sessionId = session?.id) {
@@ -239,7 +311,14 @@ export default function Home() {
     const data = (await response.json()) as { session: GenerationSession };
     setSession(data.session);
     if (data.session.skillDraft?.markdown) setSkillMarkdown(data.session.skillDraft.markdown);
-    if (data.session.sampleHtml) setSampleHtml(data.session.sampleHtml);
+    if (data.session.sampleHtml) {
+      setSampleHtml(data.session.sampleHtml);
+      const syncedMarkdown = data.session.skillDraft?.markdown || skillMarkdown;
+      setLastSampleMarkdown(syncedMarkdown);
+      setSampleSyncStatus("synced");
+    } else {
+      setSampleSyncStatus("empty");
+    }
     return data.session;
   }
 
@@ -322,16 +401,54 @@ export default function Home() {
     const events = new EventSource(`/api/progress/${sessionId}`);
     events.addEventListener("progress", (event) => {
       const parsedEvent = JSON.parse((event as MessageEvent).data) as ProgressEvent;
-      setProgress((current) => [...current, parsedEvent]);
+      if (isTimelineEvent(parsedEvent)) {
+        setProgress((current) => [...current, parsedEvent]);
+      }
       setCurrentStage(parsedEvent.type);
-      setLastMessage(parsedEvent.message);
+      if (parsedEvent.streamKind !== "content" && parsedEvent.streamKind !== "reasoning" && parsedEvent.streamKind !== "usage") {
+        setLastMessage(parsedEvent.message);
+      }
       setLastEventAt(parsedEvent.timestamp);
+      if (parsedEvent.stepId) setStreamStepId(parsedEvent.stepId);
+      if (parsedEvent.streamKind === "content" && parsedEvent.textDelta) {
+        setStreamContent((current) => appendWithLimit(current, parsedEvent.textDelta || ""));
+        setStreamPhase("Generating output...");
+      } else if (parsedEvent.streamKind === "reasoning" && parsedEvent.textDelta) {
+        setReasoningAvailable(true);
+        setReasoningContent((current) => appendWithLimit(current, parsedEvent.textDelta || ""));
+      } else if (parsedEvent.streamKind === "usage" && parsedEvent.tokenUsage) {
+        if (parsedEvent.stepId) {
+          setStepTokenUsage((current) => ({ ...current, [parsedEvent.stepId as string]: parsedEvent.tokenUsage as TokenUsage }));
+        }
+        if (typeof parsedEvent.providerMeta?.loadDurationMs === "number") {
+          setLastLoadDurationMs(parsedEvent.providerMeta.loadDurationMs);
+        }
+      } else if (parsedEvent.streamKind === "summary" && parsedEvent.tokenUsage) {
+        setTokenTotals(parsedEvent.tokenUsage);
+      } else if (parsedEvent.streamKind === "status" && parsedEvent.providerMeta?.streamStatus) {
+        if (parsedEvent.providerMeta.streamStatus === "waiting_for_first_chunk") {
+          setStreamPhase(
+            parsedEvent.providerMeta.modelResident
+              ? "Contacting Ollama..."
+              : "Loading model into GPU memory..."
+          );
+        } else {
+          setStreamPhase("Generating output...");
+        }
+      }
     });
     events.addEventListener("session", (event) => {
       const nextSession = JSON.parse((event as MessageEvent).data) as GenerationSession;
       setSession(nextSession);
       if (nextSession.skillDraft?.markdown) setSkillMarkdown(nextSession.skillDraft.markdown);
-      if (nextSession.sampleHtml) setSampleHtml(nextSession.sampleHtml);
+      if (nextSession.sampleHtml) {
+        setSampleHtml(nextSession.sampleHtml);
+        const syncedMarkdown = nextSession.skillDraft?.markdown || skillMarkdown;
+        setLastSampleMarkdown(syncedMarkdown);
+        setSampleSyncStatus("synced");
+      } else {
+        setSampleSyncStatus("empty");
+      }
       setBusy(false);
       if (nextSession.status === "error") {
         finishRun("error", "error", nextSession.error || "The run ended with an error.");
@@ -366,6 +483,14 @@ export default function Home() {
     setCurrentStage("queued");
     setLastMessage(mode === "generate" ? "Starting skill generation..." : "Starting skill verification...");
     setClockNow(now);
+    setStreamStepId(null);
+    setStreamContent("");
+    setReasoningContent("");
+    setReasoningAvailable(false);
+    setTokenTotals({});
+    setStepTokenUsage({});
+    setStreamPhase("Contacting provider...");
+    setLastLoadDurationMs(null);
   }
 
   function finishRun(nextState: Exclude<RunState, "idle" | "running">, stage: ProgressEvent["type"], message: string) {
@@ -397,8 +522,9 @@ export default function Home() {
     }
   }
 
-  async function regenerateSample() {
+  async function refreshSamplePreview(openSampleTab = false) {
     if (!session) return;
+    setSampleSyncStatus("refreshing");
     setBusy(true);
     const response = await fetch("/api/sample", {
       method: "POST",
@@ -408,11 +534,14 @@ export default function Home() {
     setBusy(false);
     if (!response.ok) {
       setNotice(await response.text());
+      setSampleSyncStatus("error");
       return;
     }
     const data = (await response.json()) as { sampleHtml: string };
     setSampleHtml(data.sampleHtml);
-    setActiveTab("sample");
+    setLastSampleMarkdown(skillMarkdown);
+    setSampleSyncStatus("synced");
+    if (openSampleTab) setActiveTab("sample");
   }
 
   function acceptPatch(finding: VerificationFinding) {
@@ -439,6 +568,27 @@ export default function Home() {
   const elapsedSeconds = runStartedAt ? Math.max(0, Math.floor((clockNow - runStartedAt) / 1000)) : 0;
   const secondsSinceEvent = lastEventAt ? Math.max(0, Math.floor((clockNow - lastEventAt) / 1000)) : 0;
   const statusClass = runState === "running" ? "running" : runState === "error" ? "error" : runState === "complete" ? "complete" : "idle";
+  const currentStepUsage = streamStepId ? stepTokenUsage[streamStepId] : undefined;
+
+  useEffect(() => {
+    if (!sampleHtml) {
+      setSampleSyncStatus("empty");
+      return;
+    }
+    if (skillMarkdown !== lastSampleMarkdown && sampleSyncStatus !== "refreshing") {
+      setSampleSyncStatus("stale");
+    }
+  }, [lastSampleMarkdown, sampleHtml, sampleSyncStatus, skillMarkdown]);
+
+  useEffect(() => {
+    if (sampleSyncStatus !== "stale" || !session || runActive || busy) return;
+    const timeoutId = window.setTimeout(() => {
+      void refreshSamplePreview(false);
+    }, 900);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [busy, runActive, sampleSyncStatus, session, skillMarkdown]);
 
   return (
     <main className="app-shell">
@@ -451,9 +601,6 @@ export default function Home() {
           <div className="row">
             <button onClick={() => void resetWorkspace()} disabled={busy || runActive}>
               Reset
-            </button>
-            <button className="primary" onClick={startGeneration} disabled={busy || runActive || !session || !assets.length}>
-              Generate Skill
             </button>
           </div>
         </div>
@@ -472,7 +619,26 @@ export default function Home() {
             </div>
             <div className="field">
               <label htmlFor="model">Model</label>
-              {providerKind === "ollama" ? (
+              {providerKind === "openai" ? (
+                <select
+                  id="model"
+                  value={model}
+                  onChange={(event) => setModel(event.target.value)}
+                  disabled={openaiModelsLoading || !apiKey.trim() || !openaiModels.length}
+                >
+                  {openaiModels.length ? (
+                    openaiModels.map((openaiModel) => (
+                      <option key={openaiModel.id} value={openaiModel.id}>
+                        {openaiModel.label}
+                      </option>
+                    ))
+                  ) : (
+                    <option value={model}>
+                      {!apiKey.trim() ? "Enter API key to load models" : openaiModelsLoading ? "Loading models..." : "No models found"}
+                    </option>
+                  )}
+                </select>
+              ) : (
                 <select
                   id="model"
                   value={model}
@@ -489,8 +655,13 @@ export default function Home() {
                     <option value={model}>{modelsLoading ? "Loading models..." : "No models found"}</option>
                   )}
                 </select>
-              ) : (
-                <input id="model" value={model} onChange={(event) => setModel(event.target.value)} />
+              )}
+              {providerKind === "openai" && openaiModelsError && <div className="disclosure hint">{openaiModelsError}</div>}
+              {providerKind === "openai" && !apiKey.trim() && (
+                <div className="disclosure hint">Add an OpenAI API key to load available models and estimated token cost.</div>
+              )}
+              {providerKind === "openai" && !!apiKey.trim() && !openaiModelsLoading && !openaiModelsError && !openaiModels.length && (
+                <div className="disclosure hint">No compatible chat models were returned by OpenAI for this key.</div>
               )}
               {providerKind === "ollama" && modelsError && <div className="disclosure hint">{modelsError}</div>}
               {providerKind === "ollama" && !modelsLoading && !modelsError && !ollamaModels.length && (
@@ -573,6 +744,10 @@ export default function Home() {
                 <div className="empty">No assets added yet.</div>
               )}
             </div>
+            <button className="primary" onClick={startGeneration} disabled={busy || runActive || !session || !assets.length}>
+              Generate Skill
+            </button>
+            <div className="disclosure hint">Step 3: Generate from your current provider settings and uploaded assets.</div>
           </section>
 
           <section className="stack">
@@ -610,17 +785,37 @@ export default function Home() {
             </div>
             <div className="event-list">
               {progress.length ? (
-                progress.map((event) => (
-                  <div className="event" key={event.id}>
-                    <strong>{event.message}</strong>
-                    <div className="event-time">
-                      {event.type} · {new Date(event.timestamp).toLocaleTimeString()}
+                <div className="event-log" role="log" aria-live="polite">
+                  {progress.map((event) => (
+                    <div className="event-log-line" key={event.id}>
+                      <span className="event-log-time">{new Date(event.timestamp).toLocaleTimeString()}</span>
+                      <span className="event-log-type">{event.type}</span>
+                      <span className="event-log-message">{event.message}</span>
                     </div>
-                  </div>
-                ))
+                  ))}
+                </div>
               ) : (
                 <div className="empty">Progress updates will stream here.</div>
               )}
+            </div>
+            <div className="stream-panel">
+              <div className="section-title">Model stream</div>
+              <div className="meta">Current step: {labelForStep(streamStepId)}</div>
+              <div className="meta stream-phase">
+                {streamPhase}
+                {typeof lastLoadDurationMs === "number" ? ` (model load ${formatDurationMs(lastLoadDurationMs)})` : ""}
+              </div>
+              <div className="stream-console">{streamContent || "Output stream will appear here while the model is generating."}</div>
+              <div className="token-row">
+                <span className="token-chip">Step: {formatTokenUsage(currentStepUsage)}</span>
+                <span className="token-chip">Total: {formatTokenUsage(tokenTotals)}</span>
+              </div>
+              <div className="meta">
+                {reasoningAvailable
+                  ? "Reasoning stream is shown because this provider/model is exposing it."
+                  : "Reasoning stream not exposed by provider/model."}
+              </div>
+              <div className="reasoning-console">{reasoningContent || "No reasoning chunks received."}</div>
             </div>
             {notice && <div className="quality-note">{notice}</div>}
           </section>
@@ -649,22 +844,6 @@ export default function Home() {
                 <button onClick={() => session && window.open(`/api/download/${session.id}/bundle`, "_blank")} disabled={!session}>
                   Download Bundle
                 </button>
-                <button onClick={regenerateSample} disabled={busy || runActive || !session}>
-                  Regenerate Sample
-                </button>
-              </div>
-              <div className="outline">
-                {headings.map((heading) => (
-                  <button
-                    key={heading}
-                    onClick={() => {
-                      const next = document.getElementById("skill-editor");
-                      next?.focus();
-                    }}
-                  >
-                    {heading}
-                  </button>
-                ))}
               </div>
               <div className="split-pane">
                 <section>
@@ -702,15 +881,21 @@ export default function Home() {
 
           {activeTab === "sample" && (
             <div className="panel-body stack">
-              <div className="row">
-                <button onClick={regenerateSample} disabled={busy || runActive || !session}>
-                  Regenerate Sample
-                </button>
+              <div className="meta">
+                {sampleSyncStatus === "refreshing"
+                  ? "Refreshing sample preview from current SKILL.md..."
+                  : sampleSyncStatus === "stale"
+                    ? "Detected SKILL.md changes. Refresh will run automatically."
+                    : sampleSyncStatus === "error"
+                      ? "Sample refresh failed. Keep editing and it will retry automatically."
+                      : sampleSyncStatus === "synced"
+                        ? "Sample preview is synced with the latest SKILL.md."
+                        : "Generate a skill to create the first sample preview."}
               </div>
               {sampleHtml ? (
                 <iframe className="sample-frame" sandbox="allow-same-origin" srcDoc={sampleHtml} title="Generated sample page" />
               ) : (
-                <div className="empty">Generate a skill or regenerate the sample to preview an applied design.</div>
+                <div className="empty">Generate a skill to preview an applied design sample.</div>
               )}
             </div>
           )}
@@ -806,6 +991,45 @@ function formatDuration(totalSeconds: number) {
   const seconds = totalSeconds % 60;
   if (!minutes) return `${seconds}s`;
   return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+}
+
+function appendWithLimit(current: string, nextChunk: string, limit = 12_000) {
+  const next = `${current}${nextChunk}`;
+  if (next.length <= limit) return next;
+  return `...${next.slice(next.length - limit)}`;
+}
+
+function labelForStep(stepId: ProgressStepId | null) {
+  if (!stepId) return "Waiting for first stream event";
+  if (stepId === "extract_observations") return "Extract observations";
+  if (stepId === "synthesize_rules") return "Synthesize rules";
+  if (stepId === "draft_skill") return "Draft skill";
+  if (stepId === "critique_skill") return "Critique skill";
+  if (stepId === "revise_skill") return "Revise skill";
+  if (stepId === "generate_sample") return "Generate sample";
+  return "Verify skill";
+}
+
+function formatTokenUsage(usage?: TokenUsage) {
+  if (!usage) return "n/a";
+  const prompt = usage.promptTokens ?? 0;
+  const completion = usage.completionTokens ?? 0;
+  const total = usage.totalTokens ?? prompt + completion;
+  return `p ${prompt.toLocaleString()} · c ${completion.toLocaleString()} · t ${total.toLocaleString()}`;
+}
+
+function isTimelineEvent(event: ProgressEvent) {
+  if (!event.streamKind) return true;
+  return event.streamKind === "status" || event.streamKind === "step_complete" || event.streamKind === "summary";
+}
+
+function formatDurationMs(totalMs: number) {
+  if (totalMs < 1000) return `${totalMs}ms`;
+  const seconds = totalMs / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remain = Math.round(seconds % 60);
+  return `${minutes}m ${remain}s`;
 }
 
 function renderMarkdown(markdown: string) {

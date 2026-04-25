@@ -237,6 +237,47 @@ a {
   gap: 8px;
 }
 
+.event-log {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fffefa;
+  padding: 8px;
+  max-height: 220px;
+  overflow: auto;
+  display: grid;
+  gap: 6px;
+}
+
+.event-log-line {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.event-log-time {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.event-log-type {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 0 6px;
+  min-height: 18px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.event-log-message {
+  color: var(--ink);
+  word-break: break-word;
+}
+
 .run-status {
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -311,6 +352,57 @@ a {
 .run-meta {
   color: var(--muted);
   font-size: 12px;
+}
+
+.stream-panel {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px;
+  background: #fffefa;
+  display: grid;
+  gap: 8px;
+}
+
+.stream-console,
+.reasoning-console {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fdfcf8;
+  padding: 8px;
+  min-height: 84px;
+  max-height: 180px;
+  overflow: auto;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.reasoning-console {
+  background: #f8f5ee;
+}
+
+.token-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.token-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border-radius: 999px;
+  background: var(--panel-strong);
+  padding: 0 9px;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.stream-phase {
+  font-weight: 600;
+  color: var(--accent-strong);
 }
 
 .asset,

@@ -85,7 +85,12 @@ export function addAsset(sessionId: string, asset: DesignAsset) {
   return asset;
 }
 
-export function addProgress(sessionId: string, type: ProgressEvent["type"], message: string) {
+export function addProgress(
+  sessionId: string,
+  type: ProgressEvent["type"],
+  message: string,
+  details?: Omit<Partial<ProgressEvent>, "id" | "type" | "message" | "timestamp">
+) {
   const session = getSession(sessionId);
   if (!session) {
     return;
@@ -94,7 +99,8 @@ export function addProgress(sessionId: string, type: ProgressEvent["type"], mess
     id: crypto.randomUUID(),
     type,
     message,
-    timestamp: Date.now()
+    timestamp: Date.now(),
+    ...(details || {})
   });
   session.updatedAt = Date.now();
 }
