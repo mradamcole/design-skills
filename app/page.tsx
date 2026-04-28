@@ -80,6 +80,8 @@ export default function Home() {
   const [modelsError, setModelsError] = useState("");
   const [guidance, setGuidance] = useState("");
   const [url, setUrl] = useState("");
+  const [existingSkillLoadMode, setExistingSkillLoadMode] = useState<"file" | "url">("file");
+  const [existingSkillUrl, setExistingSkillUrl] = useState("");
   const [dragging, setDragging] = useState(false);
   const [skillMarkdown, setSkillMarkdown] = useState(defaultSkill);
   const [existingSkill, setExistingSkill] = useState(defaultSkill);
@@ -111,6 +113,7 @@ export default function Home() {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [bundleAssetMode, setBundleAssetMode] = useState<BundleAssetMode>("reference");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const existingSkillFileInputRef = useRef<HTMLInputElement>(null);
   const assetsPanelRef = useRef<HTMLDivElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<HTMLDivElement>(null);
@@ -467,6 +470,46 @@ export default function Home() {
       return;
     }
     attachProgressStream(session.id);
+  }
+
+  function setVerifySkillLoadMode(mode: "file" | "url") {
+    setExistingSkillLoadMode(mode);
+    if (mode === "file") {
+      setExistingSkillUrl("");
+    } else if (existingSkillFileInputRef.current) {
+      existingSkillFileInputRef.current.value = "";
+    }
+  }
+
+  async function loadExistingSkillFromUrl(event: FormEvent) {
+    event.preventDefault();
+    const trimmed = existingSkillUrl.trim();
+    if (!trimmed) return;
+    setNotice("");
+    setBusy(true);
+    try {
+      const response = await fetch("/api/fetch-remote-text", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: trimmed })
+      });
+      if (!response.ok) {
+        const err = (await response.json().catch(() => null)) as { error?: string } | null;
+        setNotice(err?.error || (await response.text()) || "Unable to load URL");
+        return;
+      }
+      const data = (await response.json()) as { text?: string };
+      if (typeof data.text !== "string") {
+        setNotice("Invalid response from server.");
+        return;
+      }
+      setExistingSkill(data.text);
+      setNotice("");
+    } catch {
+      setNotice("Unable to load URL");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function startVerification() {
@@ -1080,7 +1123,7 @@ export default function Home() {
                 <div className="run-status-head">
                   <span className={`status-pill ${statusClass}`}>
                     {runState === "running"
-                      ? `Running ${runMode === "verify" ? "verification" : "generation"}`
+                      ? "Running generation"
                       : runState === "complete"
                         ? "Run completed"
                         : runState === "error"
@@ -1254,7 +1297,7 @@ export default function Home() {
           )}
 
           {activeTab === "verify" && (
-            <div className="panel-body stack">
+            <div className="panel-body stack verify-workspace">
               <div className="verify-card">
                 <header>
                   <strong>Verify / Update Mode</strong>
@@ -1262,25 +1305,69 @@ export default function Home() {
                     Run Verification
                   </button>
                 </header>
-                <div className="panel-body stack">
-                  <div className="field">
+                <div className="verify-card-body">
+                  <div className="field verify-skill-field">
                     <label htmlFor="existing-skill">Existing SKILL.md</label>
                     <textarea
                       id="existing-skill"
+                      className="editor"
                       value={existingSkill}
                       onChange={(event) => setExistingSkill(event.target.value)}
                       placeholder="Paste or load an existing SKILL.md here."
+                      spellCheck={false}
                     />
                   </div>
-                  <div className="row">
-                    <input
-                      type="file"
-                      accept=".md,.markdown,text/markdown,text/plain"
-                      onChange={async (event) => {
-                        const file = event.target.files?.[0];
-                        if (file) setExistingSkill(await file.text());
-                      }}
-                    />
+                  <div className="verify-load-toolbar">
+                    <div className="row tabs edit-tabs" role="tablist" aria-label="Load existing skill from file or URL">
+                      <button
+                        type="button"
+                        className={`tab${existingSkillLoadMode === "file" ? " active" : ""}`}
+                        role="tab"
+                        aria-selected={existingSkillLoadMode === "file"}
+                        onClick={() => setVerifySkillLoadMode("file")}
+                      >
+                        File
+                      </button>
+                      <button
+                        type="button"
+                        className={`tab${existingSkillLoadMode === "url" ? " active" : ""}`}
+                        role="tab"
+                        aria-selected={existingSkillLoadMode === "url"}
+                        onClick={() => setVerifySkillLoadMode("url")}
+                      >
+                        URL
+                      </button>
+                    </div>
+                    {existingSkillLoadMode === "file" ? (
+                      <div className="row">
+                        <input
+                          ref={existingSkillFileInputRef}
+                          type="file"
+                          accept=".md,.markdown,text/markdown,text/plain"
+                          onChange={async (event) => {
+                            const file = event.target.files?.[0];
+                            if (file) setExistingSkill(await file.text());
+                          }}
+                        />
+                      </div>
+                    ) : (
+                      <>
+                        <form className="row" onSubmit={(e) => void loadExistingSkillFromUrl(e)}>
+                          <input
+                            value={existingSkillUrl}
+                            onChange={(event) => setExistingSkillUrl(event.target.value)}
+                            placeholder="https://raw.githubusercontent.com/org/repo/main/SKILL.md"
+                            aria-label="URL to raw SKILL.md or plain text"
+                          />
+                          <button type="submit" disabled={busy || !existingSkillUrl.trim()}>
+                            Load
+                          </button>
+                        </form>
+                        <p className="hint">
+                          Use a direct or raw link to a Markdown or plain-text file. HTML pages are not suitable as SKILL.md.
+                        </p>
+                      </>
+                    )}
                   </div>
                   <p className="hint">
                     Use the same asset rail to add new references. Verification compares those references with the skill text above.
