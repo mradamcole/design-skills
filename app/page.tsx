@@ -54,10 +54,18 @@ const DYNAMIC_SECTION_COUNT = Math.max(1, SKILL_SECTION_DEFINITIONS.length - STA
 const TOTAL_SECTION_PROGRESS_UNITS = DYNAMIC_SECTION_COUNT * SECTION_STEP_IDS.length + 1; // +1 for assemble_skill
 const TIMELINE_PROGRESS_INCREMENT = 0.8;
 const TIMELINE_PROGRESS_CEILING = 99;
+const URL_INGEST_PHASES = [
+  "Connecting and downloading the page.",
+  "Parsing metadata and structure.",
+  "Fetching linked stylesheets.",
+  "Collecting images, icons, and linked assets.",
+  "Extracting readable text and building evidence."
+] as const;
 
 export default function Home() {
   type RunState = "idle" | "running" | "complete" | "error";
   type BundleAssetMode = "reference" | "download";
+  type AssetWorkMode = "url" | "upload" | "remove" | null;
   type SaveState = "idle" | "saving" | "saved" | "error";
   type OpenAIModelOption = { id: string; label: string; approxCostPer1M?: number };
   type UiLogEntry =
@@ -90,6 +98,9 @@ export default function Home() {
   const [uiLog, setUiLog] = useState<UiLogEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [assetWork, setAssetWork] = useState<AssetWorkMode>(null);
+  const [assetWorkStartedAt, setAssetWorkStartedAt] = useState<number | null>(null);
+  const [urlIngestPhaseIndex, setUrlIngestPhaseIndex] = useState(0);
   const [runState, setRunState] = useState<RunState>("idle");
   const [runMode, setRunMode] = useState<"generate" | "verify" | null>(null);
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
@@ -407,9 +418,11 @@ export default function Home() {
     const form = new FormData();
     form.append("sessionId", session.id);
     Array.from(files).forEach((file) => form.append("files", file));
+    setAssetWork("upload");
     setBusy(true);
     const response = await fetch("/api/assets", { method: "POST", body: form });
     setBusy(false);
+    setAssetWork(null);
     if (!response.ok) {
       setNotice(await response.text());
       return;
@@ -420,14 +433,15 @@ export default function Home() {
   async function addUrl(event: FormEvent) {
     event.preventDefault();
     if (!session || !url.trim()) return;
+    setAssetWork("url");
     setBusy(true);
-    setNotice("Fetching URL and extracting readable page text.");
     const response = await fetch("/api/assets", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ sessionId: session.id, url: url.trim() })
     });
     setBusy(false);
+    setAssetWork(null);
     if (!response.ok) {
       setNotice(await response.text());
       return;
@@ -439,6 +453,7 @@ export default function Home() {
 
   async function removeAssetById(assetId: string) {
     if (!session) return;
+    setAssetWork("remove");
     setBusy(true);
     setNotice("");
     const response = await fetch("/api/assets", {
@@ -447,6 +462,7 @@ export default function Home() {
       body: JSON.stringify({ sessionId: session.id, assetId })
     });
     setBusy(false);
+    setAssetWork(null);
     if (!response.ok) {
       setNotice(await response.text());
       return;
@@ -821,6 +837,7 @@ export default function Home() {
   const generationStarted = runMode === "generate" && runStartedAt !== null;
   const elapsedSeconds = runStartedAt ? Math.max(0, Math.floor((clockNow - runStartedAt) / 1000)) : 0;
   const secondsSinceEvent = lastEventAt ? Math.max(0, Math.floor((clockNow - lastEventAt) / 1000)) : 0;
+  const assetElapsedSeconds = assetWorkStartedAt ? Math.max(0, Math.floor((clockNow - assetWorkStartedAt) / 1000)) : 0;
   const statusClass = runState === "running" ? "running" : runState === "error" ? "error" : runState === "complete" ? "complete" : "idle";
   const currentStepUsage = streamStepId ? stepTokenUsage[streamStepId] : undefined;
   const approxCostPer1M =
@@ -859,6 +876,26 @@ export default function Home() {
     if (!generationStarted) return;
     scrollToBottom(assetsPanelRef.current);
   }, [generationStarted]);
+
+  useEffect(() => {
+    if (!busy || assetWork === null) {
+      setAssetWorkStartedAt(null);
+      setUrlIngestPhaseIndex(0);
+      return;
+    }
+    setAssetWorkStartedAt(Date.now());
+    setUrlIngestPhaseIndex(0);
+  }, [assetWork, busy]);
+
+  useEffect(() => {
+    if (!busy || assetWork !== "url") return;
+    const intervalId = window.setInterval(() => {
+      setUrlIngestPhaseIndex((current) => Math.min(URL_INGEST_PHASES.length - 1, current + 1));
+    }, 2200);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [assetWork, busy]);
 
   useEffect(() => {
     if (!session) return;
@@ -922,6 +959,11 @@ export default function Home() {
               </span>
             </button>
           </nav>
+          {notice && (
+            <div className="rail-notice" role="status" aria-live="polite">
+              {notice}
+            </div>
+          )}
 
           {railTab === "settings" && (
             <div className="panel-body rail-panel-body rail-panel-settings">
@@ -1101,6 +1143,35 @@ export default function Home() {
                 Add URL
               </button>
             </form>
+            {busy && assetWork === "url" && (
+              <div className="asset-ingest-card" role="status" aria-live="polite">
+                <div className="asset-ingest-head">
+                  <span className="status-pill running">Analyzing URL</span>
+                  <span className="status-pulse" aria-hidden />
+                </div>
+                <div className="asset-ingest-phase">{URL_INGEST_PHASES[urlIngestPhaseIndex]}</div>
+                <div className="asset-ingest-progress" aria-hidden />
+                <div className="asset-ingest-meta">Elapsed {formatDuration(assetElapsedSeconds)}</div>
+              </div>
+            )}
+            {busy && assetWork === "upload" && (
+              <div className="asset-ingest-card" role="status" aria-live="polite">
+                <div className="asset-ingest-head">
+                  <span className="status-pill running">Uploading assets</span>
+                  <span className="status-pulse" aria-hidden />
+                </div>
+                <div className="asset-ingest-phase">Uploading files and extracting text from supported formats.</div>
+              </div>
+            )}
+            {busy && assetWork === "remove" && (
+              <div className="asset-ingest-card" role="status" aria-live="polite">
+                <div className="asset-ingest-head">
+                  <span className="status-pill running">Removing asset</span>
+                  <span className="status-pulse" aria-hidden />
+                </div>
+                <div className="asset-ingest-phase">Removing this item from the current session.</div>
+              </div>
+            )}
             {assets.length > 0 && (
               <div className="asset-list">
                 {assets.map((asset: DesignAsset) => (
@@ -1219,7 +1290,6 @@ export default function Home() {
                 </div>
                 <div className="reasoning-console" ref={reasoningRef}>{reasoningContent || "No reasoning chunks received."}</div>
               </div>
-              {notice && <div className="quality-note">{notice}</div>}
             </section>
           )}
             </div>

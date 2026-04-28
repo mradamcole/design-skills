@@ -479,6 +479,7 @@ export function buildExtractionPrompt(guidance?: string) {
   return `You are extracting design-system guidance for a Codex SKILL.md file.
 Return bullets: - category=<one of color|typography|layout|components|accessibility|visual language>; confidence=<high|medium|low>; source=<asset name>; observation=<concrete observation>
 Preserve concrete values (font families, type sizes, CSS variables, colors, tokens, spacing, radii, states). Keep each bullet under 180 characters.
+Do not use emojis.
 Optional user guidance: ${guidance || "none"}`;
 }
 export function buildSynthesisPrompt(rawExtraction: string, guidance?: string) {
@@ -515,6 +516,7 @@ function buildSectionPrompt(packet: SectionEvidencePacket, guidance?: string) {
 Intent: ${section.intent}
 At least ${target.minBullets || 1} bullets. At most ${target.maxBullets || 8}. ${target.maxCharsPerBullet ? `Each bullet <= ${target.maxCharsPerBullet} chars.` : ""}
 Use only evidence-backed claims. Every bullet must map to one or more fact_id values when available.
+Do not use emojis.
 If sparse evidence: ${section.emptyEvidencePolicy}
 Optional user guidance: ${guidance || "none"}
 Top Facts:
@@ -531,21 +533,21 @@ function buildSectionCritiquePrompt(packet: SectionEvidencePacket, draftSection:
   const evidence = packet.compiled?.selectedFacts.length
     ? packet.compiled.selectedFacts.map((fact) => `- ${fact.value}`).join("\n")
     : packet.observations.map((item) => `- ${item.assetName}: ${item.observation}`).join("\n") || "- none";
-  return `Critique this section ${section.heading} for unsupported claims, vagueness, repetition, and bullet-length violations.
+  return `Critique this section ${section.heading} for unsupported claims, vagueness, repetition, bullet-length violations, and any emoji usage.
 Evidence:
 ${evidence}
 Draft:
 ${draftSection}`;
 }
 function buildSectionRevisionPrompt(packet: SectionEvidencePacket, draftSection: string, critique: string) {
-  return `Revise this section ${packet.section.heading} using critique. Return only markdown for ${packet.section.heading}. No new facts.
+  return `Revise this section ${packet.section.heading} using critique. Return only markdown for ${packet.section.heading}. No new facts. Do not use emojis.
 Draft:
 ${draftSection}
 Critique:
 ${critique}`;
 }
 function buildFinalConsistencyPrompt(markdown: string, guidance?: string) {
-  return `Finalize this SKILL.md. Keep headings/order, trim verbosity, remove duplicates and unsupported claims, add no new facts.
+  return `Finalize this SKILL.md. Keep headings/order, trim verbosity, remove duplicates and unsupported claims, add no new facts. Remove any emojis.
 Optional user guidance: ${guidance || "none"}
 SKILL.md:
 ${markdown}`;
@@ -714,11 +716,12 @@ function normalizeSectionBody(heading: string, raw: string, maxBullets?: number)
   const withoutHeading = raw.replace(new RegExp(`^${escapeRegExp(heading)}\\s*`, "i"), "").trim();
   const bullets = splitLines(withoutHeading)
     .map((line) => line.replace(/^[-*]\s*/, "").trim())
+    .map((line) => stripEmoji(line))
     .filter(Boolean)
     .map((line) => `- ${line}`);
   const limited = typeof maxBullets === "number" ? bullets.slice(0, maxBullets) : bullets;
   if (limited.length) return limited.join("\n");
-  if (withoutHeading) return `- ${withoutHeading}`;
+  if (withoutHeading) return `- ${stripEmoji(withoutHeading)}`;
   return "- No validated guidance available.";
 }
 function extractSectionBody(markdown: string, heading: string) {
@@ -767,4 +770,8 @@ function formatUsage(usage: TokenUsage) {
   const completion = usage.completionTokens ?? 0;
   const total = usage.totalTokens ?? prompt + completion;
   return `prompt ${prompt.toLocaleString()} · completion ${completion.toLocaleString()} · total ${total.toLocaleString()}`;
+}
+
+function stripEmoji(value: string) {
+  return value.replace(/\p{Extended_Pictographic}/gu, "").replace(/\s{2,}/g, " ").trim();
 }

@@ -755,6 +755,52 @@ a {
   color: var(--accent-strong);
 }
 
+.rail-notice {
+  margin: 8px 10px 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px;
+  background: #fffefa;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.asset-ingest-card {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px;
+  background: #fffefa;
+  display: grid;
+  gap: 8px;
+}
+
+.asset-ingest-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.asset-ingest-phase {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+.asset-ingest-progress {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  min-height: 8px;
+  background: linear-gradient(90deg, rgba(110, 184, 166, 0.18), rgba(14, 124, 102, 0.55), rgba(110, 184, 166, 0.18));
+  background-size: 200% 100%;
+  animation: ingest-progress 1.6s linear infinite;
+}
+
+.asset-ingest-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .asset,
 .event,
 .finding,
@@ -1096,5 +1142,14 @@ a {
   100% {
     transform: scale(0.95);
     box-shadow: 0 0 0 0 rgba(14, 124, 102, 0);
+  }
+}
+
+@keyframes ingest-progress {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: 0 0;
   }
 }
