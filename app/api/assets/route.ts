@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { fileToAsset, urlToAsset } from "@/lib/assets";
-import { addAsset, getSession, removeAsset } from "@/lib/store";
+import { addAsset, getSession, removeAsset, updateImageMetadata } from "@/lib/store";
 
 export async function POST(request: Request) {
   const contentType = request.headers.get("content-type") || "";
@@ -31,6 +31,37 @@ export async function POST(request: Request) {
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Unable to ingest URL" },
+      { status: 400 }
+    );
+  }
+}
+
+export async function PATCH(request: Request) {
+  const body = (await request.json().catch(() => null)) as {
+    sessionId?: string;
+    assetId?: string;
+    embeddedAssetId?: string | null;
+    humanName?: string;
+    pinToBrand?: boolean;
+  } | null;
+  if (!body?.sessionId || !getSession(body.sessionId)) {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+  if (!body.assetId) {
+    return NextResponse.json({ error: "assetId is required" }, { status: 400 });
+  }
+  const patch: { humanName?: string; pinToBrand?: boolean } = {};
+  if (typeof body.humanName === "string") patch.humanName = body.humanName;
+  if (typeof body.pinToBrand === "boolean") patch.pinToBrand = body.pinToBrand;
+  if (!Object.keys(patch).length) {
+    return NextResponse.json({ error: "humanName and/or pinToBrand required" }, { status: 400 });
+  }
+  try {
+    const session = updateImageMetadata(body.sessionId, body.assetId, body.embeddedAssetId ?? null, patch);
+    return NextResponse.json({ session });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Unable to update image metadata" },
       { status: 400 }
     );
   }

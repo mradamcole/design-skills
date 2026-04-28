@@ -67,6 +67,8 @@ export interface DesignAsset {
   embeddedAssets?: EmbeddedAsset[];
   status: AssetStatus;
   warning?: string;
+  humanName?: string;
+  pinToBrand?: boolean;
 }
 
 export interface EmbeddedAsset {
@@ -79,6 +81,8 @@ export interface EmbeddedAsset {
   status: EmbeddedAssetFetchStatus;
   warning?: string;
   bytesBase64?: string;
+  humanName?: string;
+  pinToBrand?: boolean;
 }
 
 export interface ProgressEvent {

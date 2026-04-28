@@ -117,6 +117,63 @@ export function removeAsset(sessionId: string, assetId: string) {
   return true;
 }
 
+export function updateImageMetadata(
+  sessionId: string,
+  assetId: string,
+  embeddedAssetId: string | null | undefined,
+  patch: { humanName?: string; pinToBrand?: boolean }
+) {
+  const session = getSession(sessionId);
+  if (!session) {
+    throw new Error("Session not found");
+  }
+  const target = session.assets.find((a) => a.id === assetId);
+  if (!target) {
+    throw new Error("Asset not found");
+  }
+
+  if (embeddedAssetId) {
+    const em = target.embeddedAssets?.find((e) => e.id === embeddedAssetId);
+    if (!em) {
+      throw new Error("Embedded asset not found");
+    }
+    Object.assign(em, patch);
+  } else {
+    if (target.type !== "image") {
+      throw new Error("Top-level image metadata only applies to uploaded image assets");
+    }
+    Object.assign(target, patch);
+  }
+  session.updatedAt = Date.now();
+
+  const mirror = (memAsset: DesignAsset) => {
+    if (embeddedAssetId) {
+      const e = memAsset.embeddedAssets?.find((x) => x.id === embeddedAssetId);
+      if (e) Object.assign(e, patch);
+    } else {
+      Object.assign(memAsset, patch);
+    }
+  };
+
+  const memById = store.settingsMemory.assets.find((a) => a.id === assetId);
+  if (memById) {
+    mirror(memById);
+  } else {
+    const memByFp = store.settingsMemory.assets.findIndex(
+      (asset) =>
+        asset.name === target.name &&
+        asset.source === target.source &&
+        asset.type === target.type &&
+        asset.mimeType === target.mimeType
+    );
+    if (memByFp >= 0) {
+      mirror(store.settingsMemory.assets[memByFp]!);
+    }
+  }
+
+  return session;
+}
+
 export function addProgress(
   sessionId: string,
   type: ProgressEvent["type"],

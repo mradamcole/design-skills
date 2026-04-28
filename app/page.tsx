@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { collectImageCards, displayHumanName, formatBytes, proposeHumanName, type ImageCard } from "@/lib/imageCards";
 import { resolveApproxCostPer1M } from "@/lib/openaiModels";
 import { SKILL_SECTION_DEFINITIONS, STATIC_BASELINE_SECTION_IDS } from "@/lib/skillSections";
 import type {
@@ -64,9 +65,9 @@ export default function Home() {
     | { id: string; kind: "summary"; summary: { durationMs: number; usage?: TokenUsage; endedAt: number } }
     | { id: string; kind: "boundary"; label: string; startedAt: number };
   const [session, setSession] = useState<GenerationSession | null>(null);
-  const [activeTab, setActiveTab] = useState<"edit" | "verify">("edit");
+  const [activeTab, setActiveTab] = useState<"welcome" | "edit" | "verify">("welcome");
   const [railTab, setRailTab] = useState<"assets" | "settings">("assets");
-  const [editViewTab, setEditViewTab] = useState<"markdown" | "preview" | "sample">("markdown");
+  const [editViewTab, setEditViewTab] = useState<"markdown" | "images" | "preview" | "sample">("markdown");
   const [providerKind, setProviderKind] = useState<ProviderKind>("openai");
   const [model, setModel] = useState("gpt-4o-mini");
   const [apiKey, setApiKey] = useState("");
@@ -453,6 +454,27 @@ export default function Home() {
     await refreshSession();
   }
 
+  async function patchImageMetadata(card: ImageCard, patch: { humanName?: string; pinToBrand?: boolean }) {
+    if (!session) return;
+    setNotice("");
+    const response = await fetch("/api/assets", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionId: session.id,
+        assetId: card.ownerAssetId,
+        embeddedAssetId: card.embeddedAssetId ?? null,
+        ...patch
+      })
+    });
+    if (!response.ok) {
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      setNotice(data.error || "Unable to save image settings.");
+      return;
+    }
+    await refreshSession();
+  }
+
   async function startGeneration() {
     if (!session) return;
     setBusy(true);
@@ -793,6 +815,7 @@ export default function Home() {
   }
 
   const assets = session?.assets || [];
+  const imageCards = useMemo(() => collectImageCards(assets), [assets]);
   const findings = session?.verificationReport?.findings || [];
   const runActive = runState === "running";
   const generationStarted = runMode === "generate" && runStartedAt !== null;
@@ -862,7 +885,7 @@ export default function Home() {
         <div className="topbar-inner">
           <div className="brand">
             <strong>Design SKILL.md Generator</strong>
-            <span>Local web app for distilling design references into reusable Codex skills</span>
+            <span>Distill design references into LLM Code-assist skills.md</span>
           </div>
           <div className="row">
             <button onClick={() => void resetWorkspace()} disabled={busy || runActive}>
@@ -1205,6 +1228,9 @@ export default function Home() {
 
         <section className="main-panel">
           <nav className="tabs workspace-tabs" aria-label="Workspace tabs">
+            <button className={`tab${activeTab === "welcome" ? " active" : ""}`} onClick={() => setActiveTab("welcome")}>
+              Welcome
+            </button>
             <button className={`tab${activeTab === "edit" ? " active" : ""}`} onClick={() => setActiveTab("edit")}>
               Edit
             </button>
@@ -1212,6 +1238,44 @@ export default function Home() {
               Verify
             </button>
           </nav>
+
+          {activeTab === "welcome" && (
+            <div className="panel-body welcome-workspace">
+              <div className="welcome-hero">
+                <h1 className="welcome-hero-title">Design SKILL.md Generator</h1>
+                <p className="welcome-hero-lede">
+                  Turn design references into a structured <strong>SKILL.md</strong> you can use with agents and tools. Add uploads and
+                  URLs, run generation, preview markdown and a sample page, download a bundle, and use <strong>Verify</strong> to check or
+                  update an existing skill against your assets.
+                </p>
+              </div>
+              <div className="welcome-howto">
+                <h2 className="section-title">How to use this app</h2>
+                <ol className="welcome-howto-list">
+                  <li>
+                    <strong>Settings</strong> <span className="hint">(left rail)</span> — Choose OpenAI or Ollama, pick a model, and enter
+                    your API key or Ollama base URL.
+                  </li>
+                  <li>
+                    <strong>Assets &amp; Progress</strong> — Drop files or add a URL, optionally add guidance, then start generation and
+                    watch progress in the rail.
+                  </li>
+                  <li>
+                    <strong>Edit</strong> — Refine <code className="welcome-inline-code">SKILL.md</code>, tune image metadata, use Preview
+                    for rendered markdown, and Sample for the generated HTML preview.
+                  </li>
+                  <li>
+                    <strong>Verify</strong> — Load an existing <code className="welcome-inline-code">SKILL.md</code> (file or URL), run
+                    verification, and apply suggested patches back into your draft.
+                  </li>
+                  <li>
+                    <strong>Download</strong> — From Edit, download <code className="welcome-inline-code">SKILL.md</code> or the full bundle
+                    when you are ready to ship.
+                  </li>
+                </ol>
+              </div>
+            </div>
+          )}
 
           {activeTab === "edit" && (
             <div className="panel-body stack edit-workspace">
@@ -1226,6 +1290,15 @@ export default function Home() {
                       onClick={() => setEditViewTab("markdown")}
                     >
                       SKILL.md
+                    </button>
+                    <button
+                      type="button"
+                      className={`tab${editViewTab === "images" ? " active" : ""}`}
+                      role="tab"
+                      aria-selected={editViewTab === "images"}
+                      onClick={() => setEditViewTab("images")}
+                    >
+                      Images{imageCards.length > 0 ? ` (${imageCards.length})` : ""}
                     </button>
                     <button
                       type="button"
@@ -1255,6 +1328,23 @@ export default function Home() {
                     onChange={(event) => setSkillMarkdown(event.target.value)}
                     spellCheck={false}
                   />
+                ) : editViewTab === "images" ? (
+                  <div className="images-tab-pane">
+                    {imageCards.length > 0 ? (
+                      <div className="image-grid">
+                        {imageCards.map((card) => (
+                          <ImageMetadataCard
+                            key={card.id}
+                            card={card}
+                            disabled={busy || runActive}
+                            onPatch={(patch) => void patchImageMetadata(card, patch)}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="empty">Add a URL or upload images to populate this tab.</div>
+                    )}
+                  </div>
                 ) : editViewTab === "preview" ? (
                   <article className="preview" dangerouslySetInnerHTML={{ __html: renderMarkdown(skillMarkdown) }} />
                 ) : (
@@ -1402,6 +1492,97 @@ export default function Home() {
         </section>
       </div>
     </main>
+  );
+}
+
+function ImageMetadataCard({
+  card,
+  disabled,
+  onPatch
+}: {
+  card: ImageCard;
+  disabled: boolean;
+  onPatch: (patch: { humanName?: string; pinToBrand?: boolean }) => void;
+}) {
+  const resolved = useMemo(() => displayHumanName(card.fileName, card.humanName), [card.fileName, card.humanName]);
+  const [name, setName] = useState(resolved);
+  const [dimensions, setDimensions] = useState<{ w: number; h: number } | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputId = `img-name-${card.id.replace(/:/g, "-")}`;
+
+  useEffect(() => {
+    setName(resolved);
+  }, [resolved]);
+
+  useEffect(() => {
+    setDimensions(null);
+  }, [card.id, card.displaySrc]);
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
+
+  function scheduleNamePatch(value: string) {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      debounceRef.current = null;
+      onPatch({ humanName: value });
+    }, 300);
+  }
+
+  return (
+    <div className="image-card">
+      <label className="image-card-pin">
+        <input
+          type="checkbox"
+          checked={card.pinToBrand === true}
+          disabled={disabled}
+          onChange={(e) => onPatch({ pinToBrand: e.target.checked })}
+          aria-label="Pin to Brand section of SKILL.md"
+        />
+        <span>Pin to Brand</span>
+      </label>
+      <div className="thumb">
+        <img
+          src={card.displaySrc}
+          alt={resolved}
+          onLoad={(e) =>
+            setDimensions({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })
+          }
+        />
+      </div>
+      <code className="filename" title={card.fileName}>
+        {card.fileName}
+      </code>
+      <div className="image-meta" aria-label="Image dimensions and size">
+        <span>{dimensions ? `${dimensions.w} × ${dimensions.h}` : "—"}</span>
+        <span aria-hidden>·</span>
+        <span>{formatBytes(card.fileSizeBytes)}</span>
+      </div>
+      <input
+        id={inputId}
+        className="name-input"
+        value={name}
+        disabled={disabled}
+        aria-label="Display name"
+        onChange={(e) => {
+          const v = e.target.value;
+          setName(v);
+          scheduleNamePatch(v);
+        }}
+        onBlur={() => {
+          if (debounceRef.current) {
+            clearTimeout(debounceRef.current);
+            debounceRef.current = null;
+          }
+          onPatch({ humanName: name });
+        }}
+        placeholder={proposeHumanName(card.fileName)}
+        autoComplete="off"
+      />
+    </div>
   );
 }
 

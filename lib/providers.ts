@@ -1,3 +1,4 @@
+import { formatPinnedBrandAssetsBlock } from "./imageCards";
 import type { DesignAsset, ProviderConfig, TokenUsage } from "./types";
 
 type StreamEvent =
@@ -374,6 +375,7 @@ function nanosToMs(value?: number) {
 }
 
 export function buildAssetPrompt(prompt: string, assets: DesignAsset[]) {
+  const pinnedBlock = formatPinnedBrandAssetsBlock(assets);
   const assetBlocks = assets
     .map((asset, index) => {
       const body = asset.content || asset.warning || "[visual asset supplied separately if supported]";
@@ -397,5 +399,5 @@ ${body.slice(0, contentLimit)}`;
 
 Analyze these design references. Use concrete, reusable design observations and cite asset names when useful.
 
-${assetBlocks}`;
+${pinnedBlock}${assetBlocks}`;
 }

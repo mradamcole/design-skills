@@ -18,6 +18,7 @@ import {
 } from "./skillQualityCore";
 import { compileSectionEvidence, normalizeObservationCategory, type CompiledSectionEvidence, type ObservationCategory } from "./sectionEvidence";
 import { validateSectionClaims } from "./sectionValidation";
+import { collectPinnedBrandCards, formatRequiredBrandPinsBlock, type ImageCard } from "./imageCards";
 import type {
   DesignAsset,
   ProgressStepId,
@@ -47,6 +48,7 @@ type SectionEvidencePacket = {
   compiled?: CompiledSectionEvidence;
   diagnostics?: string[];
   isStaticSection?: boolean;
+  brandPins?: ImageCard[];
 };
 
 function buildSectionQualityNotes(sectionDrafts: SectionDraft[]) {
@@ -116,11 +118,16 @@ export async function runGeneration(
     const observations = parseObservations(rawExtraction, usableAssets);
     addProgress(sessionId, "synthesizing_rules", "Planning section-specific evidence packets.", { stepId: "plan_sections" });
     const compiledEvidence = compileSectionEvidence(observations, usableAssets);
-    const sectionEvidence = buildSectionEvidence(observations, compiledEvidence, {
-      useCompiled: sectionEvidenceCompilerEnabled,
-      shadowCompiled: sectionEvidenceShadowEnabled,
-      staticBaselines: sectionStaticBaselinesEnabled
-    });
+    const sectionEvidence = buildSectionEvidence(
+      observations,
+      compiledEvidence,
+      usableAssets,
+      {
+        useCompiled: sectionEvidenceCompilerEnabled,
+        shadowCompiled: sectionEvidenceShadowEnabled,
+        staticBaselines: sectionStaticBaselinesEnabled
+      }
+    );
     if (sectionEvidenceDiagnosticsEnabled) {
       const summary = compiledEvidence
         .map((packet) => `${packet.section.id}: facts=${packet.facts.length}, selected=${packet.selectedFacts.length}, conflicts=${packet.conflicts.length}, unknowns=${packet.unknowns.length}`)
@@ -394,8 +401,10 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 function buildSectionEvidence(
   observations: SourceObservation[],
   compiled: CompiledSectionEvidence[],
+  assets: DesignAsset[],
   options: { useCompiled: boolean; shadowCompiled: boolean; staticBaselines: boolean }
 ): SectionEvidencePacket[] {
+  const brandPins = collectPinnedBrandCards(assets);
   return SKILL_SECTION_DEFINITIONS.map((section) => {
     const compiledPacket = compiled.find((entry) => entry.section.id === section.id);
     const staticSection = options.staticBaselines && STATIC_BASELINE_SECTION_IDS.includes(section.id);
@@ -422,7 +431,8 @@ function buildSectionEvidence(
       observations: chosen.slice(0, MAX_EVIDENCE_LINES_PER_SECTION),
       compiled: compiledPacket,
       diagnostics,
-      isStaticSection: staticSection
+      isStaticSection: staticSection,
+      brandPins: section.id === "brand" ? brandPins : undefined
     };
   });
 }
@@ -487,7 +497,7 @@ Synthesis:
 ${synthesis}`;
 }
 function buildSectionPrompt(packet: SectionEvidencePacket, guidance?: string) {
-  const { section, observations, compiled } = packet;
+  const { section, observations, compiled, brandPins } = packet;
   const evidence = observations.map((item) => `- [${item.category}/${item.confidence}] ${item.assetName}: ${item.observation}`).join("\n") || "- No reliable evidence.";
   const target = section.target;
   const facts = compiled?.selectedFacts || [];
@@ -500,6 +510,7 @@ function buildSectionPrompt(packet: SectionEvidencePacket, guidance?: string) {
     ? conflicts.map((conflict) => `- ${conflict.kind}: ${conflict.values.join(" | ")}`).join("\n")
     : "- None";
   const unknownLines = unknowns.length ? unknowns.map((unknown) => `- ${unknown}`).join("\n") : "- None";
+  const requiredBrandPins = section.id === "brand" ? formatRequiredBrandPinsBlock(brandPins || []) : "";
   return `Required heading: ${section.heading}
 Intent: ${section.intent}
 At least ${target.minBullets || 1} bullets. At most ${target.maxBullets || 8}. ${target.maxCharsPerBullet ? `Each bullet <= ${target.maxCharsPerBullet} chars.` : ""}
@@ -513,7 +524,7 @@ ${conflictLines}
 Unknowns:
 ${unknownLines}
 Observed Evidence:
-${evidence}`;
+${evidence}${requiredBrandPins}`;
 }
 function buildSectionCritiquePrompt(packet: SectionEvidencePacket, draftSection: string) {
   const section = packet.section;
