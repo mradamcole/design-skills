@@ -127,6 +127,8 @@ a {
 .workspace {
   max-width: 1440px;
   width: 100%;
+  height: 100%;
+  min-height: 0;
   margin: 0 auto;
   padding: 24px;
   display: grid;
@@ -146,12 +148,19 @@ a {
 }
 
 .rail {
-  height: fit-content;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   overflow: hidden;
 }
 
 .main-panel {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   overflow: hidden;
 }
@@ -242,6 +251,17 @@ a {
 
 .panel-body {
   padding: 18px;
+}
+
+.rail-panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.rail-panel-body > section + section {
+  margin-top: 12px;
 }
 
 .field {
@@ -343,6 +363,17 @@ a {
 .stack {
   display: grid;
   gap: 12px;
+}
+
+.edit-workspace {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.edit-workspace > .row {
+  flex: 0 0 auto;
 }
 
 .row {
@@ -754,6 +785,40 @@ a {
   background: white;
 }
 
+.edit-workspace .edit-card {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.edit-workspace .edit-card > .editor,
+.edit-workspace .edit-card > .preview,
+.edit-workspace .edit-card > .edit-sample-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.edit-workspace .edit-card > .editor {
+  height: 100%;
+  overflow: auto;
+  resize: none;
+}
+
+.edit-workspace .edit-card > .edit-sample-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.edit-workspace .edit-card > .edit-sample-pane .sample-frame {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+}
+
 .outline {
   display: flex;
   flex-wrap: wrap;
@@ -793,6 +858,16 @@ a {
 
   .workspace {
     padding: 16px;
+    height: auto;
+  }
+
+  .rail,
+  .main-panel {
+    height: auto;
+  }
+
+  .rail-panel-body {
+    overflow: visible;
   }
 
   .workspace-tabs {

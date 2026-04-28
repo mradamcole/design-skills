@@ -111,6 +111,7 @@ export default function Home() {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [bundleAssetMode, setBundleAssetMode] = useState<BundleAssetMode>("reference");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const assetsPanelRef = useRef<HTMLDivElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<HTMLDivElement>(null);
   const reasoningRef = useRef<HTMLDivElement>(null);
@@ -751,6 +752,7 @@ export default function Home() {
   const assets = session?.assets || [];
   const findings = session?.verificationReport?.findings || [];
   const runActive = runState === "running";
+  const generationStarted = runMode === "generate" && runStartedAt !== null;
   const elapsedSeconds = runStartedAt ? Math.max(0, Math.floor((clockNow - runStartedAt) / 1000)) : 0;
   const secondsSinceEvent = lastEventAt ? Math.max(0, Math.floor((clockNow - lastEventAt) / 1000)) : 0;
   const statusClass = runState === "running" ? "running" : runState === "error" ? "error" : runState === "complete" ? "complete" : "idle";
@@ -786,6 +788,11 @@ export default function Home() {
       window.clearTimeout(timeoutId);
     };
   }, [busy, runActive, sampleSyncStatus, session, skillMarkdown]);
+
+  useEffect(() => {
+    if (!generationStarted) return;
+    scrollToBottom(assetsPanelRef.current);
+  }, [generationStarted]);
 
   useEffect(() => {
     if (!session) return;
@@ -851,7 +858,7 @@ export default function Home() {
           </nav>
 
           {railTab === "settings" && (
-            <div className="panel-body stack">
+            <div className="panel-body rail-panel-body rail-panel-settings">
           <section className="stack" role="tabpanel" aria-labelledby="rail-tab-settings">
             <div className="section-title">Provider</div>
             <div className="field">
@@ -991,7 +998,7 @@ export default function Home() {
           )}
 
           {railTab === "assets" && (
-            <div className="panel-body stack">
+            <div className="panel-body rail-panel-body rail-panel-assets" ref={assetsPanelRef}>
           <section className="stack" role="tabpanel" aria-labelledby="rail-tab-assets">
             <div className="section-title">Assets</div>
             <div
@@ -1066,87 +1073,89 @@ export default function Home() {
             </button>
           </section>
 
-          <section className="stack">
-            <div className="section-title">Progress</div>
-            <div className={`run-status ${statusClass}`} aria-live="polite">
-              <div className="run-status-head">
-                <span className={`status-pill ${statusClass}`}>
-                  {runState === "running"
-                    ? `Running ${runMode === "verify" ? "verification" : "generation"}`
-                    : runState === "complete"
-                      ? "Run completed"
-                      : runState === "error"
-                        ? "Run failed"
-                        : "Idle"}
-                </span>
-                {runActive && <span className="status-pulse" aria-hidden />}
-              </div>
-              <div className="run-stage">{labelForProgressType(currentStage)}{lastMessage ? ` - ${lastMessage}` : ""}</div>
-              {runMode === "generate" && (
-                <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={runProgressPercent}>
-                  <div className="progress-fill" style={{ width: `${runProgressPercent}%` }} />
-                  <div className="progress-meta">
-                    <span>{runMilestoneLabel}</span>
-                    <span>{Math.round(runProgressPercent)}%</span>
+          {generationStarted && (
+            <section className="stack">
+              <div className="section-title">Progress</div>
+              <div className={`run-status ${statusClass}`} aria-live="polite">
+                <div className="run-status-head">
+                  <span className={`status-pill ${statusClass}`}>
+                    {runState === "running"
+                      ? `Running ${runMode === "verify" ? "verification" : "generation"}`
+                      : runState === "complete"
+                        ? "Run completed"
+                        : runState === "error"
+                          ? "Run failed"
+                          : "Idle"}
+                  </span>
+                  {runActive && <span className="status-pulse" aria-hidden />}
+                </div>
+                <div className="run-stage">{labelForProgressType(currentStage)}{lastMessage ? ` - ${lastMessage}` : ""}</div>
+                {runMode === "generate" && (
+                  <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={runProgressPercent}>
+                    <div className="progress-fill" style={{ width: `${runProgressPercent}%` }} />
+                    <div className="progress-meta">
+                      <span>{runMilestoneLabel}</span>
+                      <span>{Math.round(runProgressPercent)}%</span>
+                    </div>
                   </div>
+                )}
+                <div className="run-meta">
+                  {runStartedAt ? `Elapsed ${formatDuration(elapsedSeconds)}` : "Waiting to start"}
+                  {lastEventAt ? ` · last update ${secondsSinceEvent}s ago` : ""}
                 </div>
-              )}
-              <div className="run-meta">
-                {runStartedAt ? `Elapsed ${formatDuration(elapsedSeconds)}` : "Waiting to start"}
-                {lastEventAt ? ` · last update ${secondsSinceEvent}s ago` : ""}
               </div>
-            </div>
-            <div className="event-list">
-              {uiLog.length ? (
-                <div className="event-log" role="log" aria-live="polite" ref={logRef}>
-                  {uiLog.map((entry) => (
-                    entry.kind === "event" ? (
-                      <div className="event-log-line" key={entry.id}>
-                        <span className="event-log-time">{new Date(entry.event.timestamp).toLocaleTimeString()}</span>
-                        <span className="event-log-type">{entry.event.type}</span>
-                        <span className="event-log-message">{entry.event.message}</span>
-                      </div>
-                    ) : entry.kind === "summary" ? (
-                      <div className="event-log-summary" key={entry.id}>
-                        Previous run · {formatDurationMs(entry.summary.durationMs)} · {formatTokenUsage(entry.summary.usage, approxCostPer1M)}
-                      </div>
-                    ) : (
-                      <div className="event-log-boundary" key={entry.id}>
-                        <div className="event-log-boundary-banner">{entry.label}</div>
-                        <div className="event-log-boundary-rule">
-                          <span>{new Date(entry.startedAt).toLocaleTimeString()}</span>
+              <div className="event-list">
+                {uiLog.length ? (
+                  <div className="event-log" role="log" aria-live="polite" ref={logRef}>
+                    {uiLog.map((entry) => (
+                      entry.kind === "event" ? (
+                        <div className="event-log-line" key={entry.id}>
+                          <span className="event-log-time">{new Date(entry.event.timestamp).toLocaleTimeString()}</span>
+                          <span className="event-log-type">{entry.event.type}</span>
+                          <span className="event-log-message">{entry.event.message}</span>
                         </div>
-                      </div>
-                    )
-                  ))}
+                      ) : entry.kind === "summary" ? (
+                        <div className="event-log-summary" key={entry.id}>
+                          Previous run · {formatDurationMs(entry.summary.durationMs)} · {formatTokenUsage(entry.summary.usage, approxCostPer1M)}
+                        </div>
+                      ) : (
+                        <div className="event-log-boundary" key={entry.id}>
+                          <div className="event-log-boundary-banner">{entry.label}</div>
+                          <div className="event-log-boundary-rule">
+                            <span>{new Date(entry.startedAt).toLocaleTimeString()}</span>
+                          </div>
+                        </div>
+                      )
+                    ))}
+                  </div>
+                ) : (
+                  <div className="run-status progress-empty-card">SKILL.md generation log</div>
+                )}
+              </div>
+              <div className="stream-panel">
+                <div className="section-title">Model stream</div>
+                <div className="meta">Current step: {labelForStep(streamStepId)}</div>
+                <div className="meta stream-phase">
+                  {streamPhase}
+                  {typeof lastLoadDurationMs === "number" ? ` (model load ${formatDurationMs(lastLoadDurationMs)})` : ""}
                 </div>
-              ) : (
-                <div className="run-status progress-empty-card">SKILL.md generation log</div>
-              )}
-            </div>
-            <div className="stream-panel">
-              <div className="section-title">Model stream</div>
-              <div className="meta">Current step: {labelForStep(streamStepId)}</div>
-              <div className="meta stream-phase">
-                {streamPhase}
-                {typeof lastLoadDurationMs === "number" ? ` (model load ${formatDurationMs(lastLoadDurationMs)})` : ""}
+                <div className="stream-console" ref={streamRef}>
+                  {streamContent || "Output stream will appear here while the model is generating."}
+                </div>
+                <div className="token-row">
+                  <span className="token-chip">Step: {formatTokenUsage(currentStepUsage, approxCostPer1M)}</span>
+                  <span className="token-chip">Total: {formatTokenUsage(tokenTotals, approxCostPer1M)}</span>
+                </div>
+                <div className="meta">
+                  {reasoningAvailable
+                    ? "Reasoning stream is shown because this provider/model is exposing it."
+                    : "Reasoning stream not exposed by provider/model."}
+                </div>
+                <div className="reasoning-console" ref={reasoningRef}>{reasoningContent || "No reasoning chunks received."}</div>
               </div>
-              <div className="stream-console" ref={streamRef}>
-                {streamContent || "Output stream will appear here while the model is generating."}
-              </div>
-              <div className="token-row">
-                <span className="token-chip">Step: {formatTokenUsage(currentStepUsage, approxCostPer1M)}</span>
-                <span className="token-chip">Total: {formatTokenUsage(tokenTotals, approxCostPer1M)}</span>
-              </div>
-              <div className="meta">
-                {reasoningAvailable
-                  ? "Reasoning stream is shown because this provider/model is exposing it."
-                  : "Reasoning stream not exposed by provider/model."}
-              </div>
-              <div className="reasoning-console" ref={reasoningRef}>{reasoningContent || "No reasoning chunks received."}</div>
-            </div>
-            {notice && <div className="quality-note">{notice}</div>}
-          </section>
+              {notice && <div className="quality-note">{notice}</div>}
+            </section>
+          )}
             </div>
           )}
         </aside>
@@ -1162,7 +1171,7 @@ export default function Home() {
           </nav>
 
           {activeTab === "edit" && (
-            <div className="panel-body stack">
+            <div className="panel-body stack edit-workspace">
               <div className="edit-card">
                 <header>
                   <div className="row tabs edit-tabs" role="tablist" aria-label="Edit panel views">
@@ -1206,7 +1215,7 @@ export default function Home() {
                 ) : editViewTab === "preview" ? (
                   <article className="preview" dangerouslySetInnerHTML={{ __html: renderMarkdown(skillMarkdown) }} />
                 ) : (
-                  <div className="panel-body stack">
+                  <div className="panel-body stack edit-sample-pane">
                     <div className="meta">
                       {sampleSyncStatus === "refreshing"
                         ? "Refreshing sample preview from current SKILL.md..."
