@@ -79,17 +79,20 @@ class OpenAIProvider implements LlmProvider {
   }
 
   private async callChat(messages: Array<Record<string, unknown>>) {
+    const body: Record<string, unknown> = {
+      model: this.config.model,
+      messages
+    };
+    if (supportsCustomTemperature(this.config.model)) {
+      body.temperature = 0.35;
+    }
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.config.apiKey}`,
         "content-type": "application/json"
       },
-      body: JSON.stringify({
-        model: this.config.model,
-        messages,
-        temperature: 0.35
-      })
+      body: JSON.stringify(body)
     });
     if (!response.ok) {
       throw new Error(`OpenAI request failed: ${response.status} ${await response.text()}`);
@@ -99,19 +102,22 @@ class OpenAIProvider implements LlmProvider {
   }
 
   private async callChatStream(messages: Array<Record<string, unknown>>, handlers?: StreamHandlers) {
+    const body: Record<string, unknown> = {
+      model: this.config.model,
+      messages,
+      stream: true,
+      stream_options: { include_usage: true }
+    };
+    if (supportsCustomTemperature(this.config.model)) {
+      body.temperature = 0.35;
+    }
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.config.apiKey}`,
         "content-type": "application/json"
       },
-      body: JSON.stringify({
-        model: this.config.model,
-        messages,
-        temperature: 0.35,
-        stream: true,
-        stream_options: { include_usage: true }
-      })
+      body: JSON.stringify(body)
     });
     if (!response.ok) {
       throw new Error(`OpenAI request failed: ${response.status} ${await response.text()}`);
@@ -317,6 +323,10 @@ function extractOpenAiDeltaText(content: unknown) {
       return typeof text === "string" ? text : "";
     })
     .join("");
+}
+
+function supportsCustomTemperature(modelName: string) {
+  return !/^gpt-5(\b|[-.])/i.test(modelName.trim());
 }
 
 function extractReasoningText(delta: Record<string, unknown>) {

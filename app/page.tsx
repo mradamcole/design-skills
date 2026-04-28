@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { resolveApproxCostPer1M } from "@/lib/openaiModels";
 import type {
   DesignAsset,
   GenerationSession,
@@ -39,6 +40,7 @@ Use this skill when generating or reviewing interfaces for this design system.
 export default function Home() {
   type RunState = "idle" | "running" | "complete" | "error";
   type BundleAssetMode = "reference" | "download";
+  type SaveState = "idle" | "saving" | "saved" | "error";
   type OpenAIModelOption = { id: string; label: string; approxCostPer1M?: number };
   type UiLogEntry =
     | { id: string; kind: "event"; event: ProgressEvent }
@@ -84,11 +86,15 @@ export default function Home() {
   const [memoryReady, setMemoryReady] = useState(false);
   const [sampleSyncStatus, setSampleSyncStatus] = useState<"empty" | "synced" | "stale" | "refreshing" | "error">("empty");
   const [lastSampleMarkdown, setLastSampleMarkdown] = useState("");
+  const [saveState, setSaveState] = useState<SaveState>("idle");
   const [bundleAssetMode, setBundleAssetMode] = useState<BundleAssetMode>("reference");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<HTMLDivElement>(null);
   const reasoningRef = useRef<HTMLDivElement>(null);
+  const saveDebounceRef = useRef<number | null>(null);
+  const savePromiseRef = useRef<Promise<boolean> | null>(null);
+  const savedSkillRef = useRef(defaultSkill);
 
   useEffect(() => {
     void loadSettingsMemory();
@@ -283,6 +289,8 @@ export default function Home() {
     setLastRunSummary(null);
     if (mode === "generate") {
       setSkillMarkdown(defaultSkill);
+      savedSkillRef.current = defaultSkill;
+      setSaveState("idle");
       setSampleHtml("");
       setLastSampleMarkdown("");
       setSampleSyncStatus("empty");
@@ -333,7 +341,11 @@ export default function Home() {
     if (!response.ok) return null;
     const data = (await response.json()) as { session: GenerationSession };
     setSession(data.session);
-    if (data.session.skillDraft?.markdown) setSkillMarkdown(data.session.skillDraft.markdown);
+    if (data.session.skillDraft?.markdown) {
+      setSkillMarkdown(data.session.skillDraft.markdown);
+      savedSkillRef.current = data.session.skillDraft.markdown;
+      setSaveState("saved");
+    }
     if (data.session.sampleHtml) {
       setSampleHtml(data.session.sampleHtml);
       const syncedMarkdown = data.session.skillDraft?.markdown || skillMarkdown;
@@ -478,7 +490,11 @@ export default function Home() {
     events.addEventListener("session", (event) => {
       const nextSession = JSON.parse((event as MessageEvent).data) as GenerationSession;
       setSession(nextSession);
-      if (nextSession.skillDraft?.markdown) setSkillMarkdown(nextSession.skillDraft.markdown);
+      if (nextSession.skillDraft?.markdown) {
+        setSkillMarkdown(nextSession.skillDraft.markdown);
+        savedSkillRef.current = nextSession.skillDraft.markdown;
+        setSaveState("saved");
+      }
       if (nextSession.sampleHtml) {
         setSampleHtml(nextSession.sampleHtml);
         const syncedMarkdown = nextSession.skillDraft?.markdown || skillMarkdown;
@@ -565,23 +581,41 @@ export default function Home() {
     }
   }
 
-  async function saveSkillToSession() {
-    if (!session) return;
+  async function persistSkillToSession(markdown: string): Promise<boolean> {
+    if (!session) return false;
+    setSaveState("saving");
     const response = await fetch(`/api/sessions/${session.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         skillDraft: {
-          markdown: skillMarkdown,
+          markdown,
           observations: session.skillDraft?.observations || [],
           qualityNotes: session.skillDraft?.qualityNotes || []
         },
-        existingSkill: skillMarkdown
+        existingSkill: markdown
       })
     });
     if (response.ok) {
-      setNotice("Saved current Markdown to the in-memory session.");
-      await refreshSession();
+      savedSkillRef.current = markdown;
+      setSaveState("saved");
+      return true;
+    }
+    setSaveState("error");
+    return false;
+  }
+
+  async function flushPendingSave() {
+    if (saveDebounceRef.current) {
+      window.clearTimeout(saveDebounceRef.current);
+      saveDebounceRef.current = null;
+      if (session && skillMarkdown !== savedSkillRef.current) {
+        savePromiseRef.current = persistSkillToSession(skillMarkdown);
+      }
+    }
+    if (savePromiseRef.current) {
+      await savePromiseRef.current;
+      savePromiseRef.current = null;
     }
   }
 
@@ -625,8 +659,9 @@ export default function Home() {
     URL.revokeObjectURL(href);
   }
 
-  function downloadBundle() {
+  async function downloadBundle() {
     if (!session) return;
+    await flushPendingSave();
     const query = new URLSearchParams({ assetMode: bundleAssetMode });
     window.open(`/api/download/${session.id}/bundle?${query.toString()}`, "_blank");
   }
@@ -638,6 +673,10 @@ export default function Home() {
   const secondsSinceEvent = lastEventAt ? Math.max(0, Math.floor((clockNow - lastEventAt) / 1000)) : 0;
   const statusClass = runState === "running" ? "running" : runState === "error" ? "error" : runState === "complete" ? "complete" : "idle";
   const currentStepUsage = streamStepId ? stepTokenUsage[streamStepId] : undefined;
+  const approxCostPer1M =
+    providerKind === "openai"
+      ? openaiModels.find((option) => option.id === model)?.approxCostPer1M ?? resolveApproxCostPer1M(model)
+      : undefined;
 
   useEffect(() => {
     if (!sampleHtml) {
@@ -658,6 +697,25 @@ export default function Home() {
       window.clearTimeout(timeoutId);
     };
   }, [busy, runActive, sampleSyncStatus, session, skillMarkdown]);
+
+  useEffect(() => {
+    if (!session) return;
+    if (skillMarkdown === savedSkillRef.current) {
+      if (saveState === "saving") setSaveState("saved");
+      return;
+    }
+    if (saveDebounceRef.current) window.clearTimeout(saveDebounceRef.current);
+    saveDebounceRef.current = window.setTimeout(() => {
+      saveDebounceRef.current = null;
+      savePromiseRef.current = persistSkillToSession(skillMarkdown);
+    }, 500);
+    return () => {
+      if (saveDebounceRef.current) {
+        window.clearTimeout(saveDebounceRef.current);
+        saveDebounceRef.current = null;
+      }
+    };
+  }, [session, skillMarkdown]);
 
   return (
     <main className="app-shell">
@@ -874,7 +932,7 @@ export default function Home() {
                       </div>
                     ) : entry.kind === "summary" ? (
                       <div className="event-log-summary" key={entry.id}>
-                        Previous run · {formatDurationMs(entry.summary.durationMs)} · {formatTokenUsage(entry.summary.usage)}
+                        Previous run · {formatDurationMs(entry.summary.durationMs)} · {formatTokenUsage(entry.summary.usage, approxCostPer1M)}
                       </div>
                     ) : (
                       <div className="event-log-boundary" key={entry.id}>
@@ -901,8 +959,8 @@ export default function Home() {
                 {streamContent || "Output stream will appear here while the model is generating."}
               </div>
               <div className="token-row">
-                <span className="token-chip">Step: {formatTokenUsage(currentStepUsage)}</span>
-                <span className="token-chip">Total: {formatTokenUsage(tokenTotals)}</span>
+                <span className="token-chip">Step: {formatTokenUsage(currentStepUsage, approxCostPer1M)}</span>
+                <span className="token-chip">Total: {formatTokenUsage(tokenTotals, approxCostPer1M)}</span>
               </div>
               <div className="meta">
                 {reasoningAvailable
@@ -931,21 +989,29 @@ export default function Home() {
           {activeTab === "edit" && (
             <div className="panel-body stack">
               <div className="row">
-                <button onClick={() => void saveSkillToSession()} disabled={!session}>
-                  Save
-                </button>
                 <button onClick={downloadCurrentSkill}>Download SKILL.md</button>
-                <select
-                  aria-label="Bundle asset mode"
-                  value={bundleAssetMode}
-                  onChange={(event) => setBundleAssetMode(event.target.value as BundleAssetMode)}
-                >
-                  <option value="reference">Reference assets</option>
-                  <option value="download">Download embedded assets</option>
-                </select>
-                <button onClick={downloadBundle} disabled={!session}>
-                  Download Bundle
-                </button>
+                <div className="row" role="group" aria-label="Download bundle controls">
+                  <button onClick={() => void downloadBundle()} disabled={!session}>
+                    Download Bundle
+                  </button>
+                  <select
+                    aria-label="Bundle asset mode"
+                    value={bundleAssetMode}
+                    onChange={(event) => setBundleAssetMode(event.target.value as BundleAssetMode)}
+                  >
+                    <option value="reference">Reference assets</option>
+                    <option value="download">Download embedded assets</option>
+                  </select>
+                </div>
+                <span className="meta" aria-live="polite">
+                  {saveState === "saving"
+                    ? "Saving..."
+                    : saveState === "saved"
+                      ? "Saved"
+                      : saveState === "error"
+                        ? "Save failed"
+                        : "Autosave idle"}
+                </span>
               </div>
               <div className="split-pane">
                 <section>
@@ -1112,12 +1178,14 @@ function labelForStep(stepId: ProgressStepId | null) {
   return "Verify skill";
 }
 
-function formatTokenUsage(usage?: TokenUsage) {
+function formatTokenUsage(usage?: TokenUsage, approxCostPer1M?: number) {
   if (!usage) return "n/a";
   const prompt = usage.promptTokens ?? 0;
   const completion = usage.completionTokens ?? 0;
   const total = usage.totalTokens ?? prompt + completion;
-  return `p ${prompt.toLocaleString()} · c ${completion.toLocaleString()} · t ${total.toLocaleString()}`;
+  const estimate = typeof approxCostPer1M === "number" ? (total / 1_000_000) * approxCostPer1M : null;
+  const costSegment = estimate !== null ? ` · $ ${estimate.toFixed(4)}` : "";
+  return `i ${prompt.toLocaleString()} · o ${completion.toLocaleString()} · t ${total.toLocaleString()}${costSegment}`;
 }
 
 function isTimelineEvent(event: ProgressEvent) {
