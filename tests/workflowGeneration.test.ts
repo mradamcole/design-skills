@@ -172,4 +172,35 @@ describe("workflow generation", () => {
     expect(updated?.status).toBe("complete");
     expect(updated?.skillDraft?.qualityNotes.length).toBeGreaterThan(0);
   });
+
+  it("uses static baseline sections without drafting prompts", async () => {
+    const session = createSession("generate");
+    const draftedHeadings: string[] = [];
+    addAsset(session.id, {
+      id: "asset-3",
+      type: "url",
+      name: "Reference A",
+      source: "https://example.com/3",
+      mimeType: "text/plain",
+      content: "reference content",
+      status: "ready"
+    });
+    const provider: LlmProvider = {
+      ...createMockProvider(),
+      async generateTextStream(prompt, handlers) {
+        const heading = prompt.match(/Required heading:\s*(##[^\n]+)/)?.[1];
+        if (heading) draftedHeadings.push(heading);
+        return createMockProvider().generateTextStream(prompt, handlers);
+      }
+    };
+    await runGeneration(session.id, providerConfig, undefined, {
+      provider,
+      sectionFirstEnabled: true,
+      sectionStaticBaselinesEnabled: true
+    });
+    expect(draftedHeadings).not.toContain("## When To Use");
+    expect(draftedHeadings).not.toContain("## Workflow");
+    expect(draftedHeadings).not.toContain("## Verification Checklist");
+    expect(draftedHeadings).toContain("## Typography");
+  });
 });

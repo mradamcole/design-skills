@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  getCrossSectionContaminationIssues,
+  getGroundingCoverage,
   getCompactnessIssues,
   getMissingSkillSections,
   getRepeatedSkillBullets,
@@ -72,5 +74,21 @@ describe("skill quality", () => {
     expect(SECTION_INTENTS["## Colors"]).toContain("tokens");
     expect(SECTION_INTENTS["## Typography"]).toContain("font");
     expect(SECTION_INTENTS["## Voice"]).toContain("capitalization");
+  });
+
+  it("flags section contamination and computes grounding coverage", () => {
+    const contaminated = `# Design System Skill
+
+## Typography
+- Use font-family: Inter.
+- Primary text color #101828.
+
+## Colors
+- Use semantic tokens.
+- Also set font-size: 16px.
+`;
+    expect(getCrossSectionContaminationIssues(contaminated).length).toBeGreaterThan(0);
+    const coverage = getGroundingCoverage(validSkill, ["layout", "sample", "readable"]);
+    expect(coverage).toBeGreaterThan(0);
   });
 });

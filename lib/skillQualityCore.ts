@@ -65,6 +65,35 @@ export function hasValidSkillShape(markdown: string) {
   return markdown.trim().startsWith("#") && getMissingSkillSections(markdown).length === 0;
 }
 
+export function getCrossSectionContaminationIssues(markdown: string) {
+  const issues: string[] = [];
+  const typographyBody = extractSectionBody(markdown, "## Typography").toLowerCase();
+  if (typographyBody.match(/#[0-9a-f]{3,8}\b|rgba?\(/i)) {
+    issues.push("## Typography: appears to contain color values that should live in ## Colors.");
+  }
+  const colorsBody = extractSectionBody(markdown, "## Colors").toLowerCase();
+  if (colorsBody.includes("font-family") || colorsBody.includes("font-size")) {
+    issues.push("## Colors: appears to contain typography declarations.");
+  }
+  const brandBody = extractSectionBody(markdown, "## Brand").toLowerCase();
+  if (brandBody.includes("tone") || brandBody.includes("sentence case")) {
+    issues.push("## Brand: appears to contain voice guidance.");
+  }
+  return issues;
+}
+
+export function getGroundingCoverage(markdown: string, factValues: string[]) {
+  const bullets = markdown
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^[-*]\s+/.test(line))
+    .map((line) => line.replace(/^[-*]\s+/, "").toLowerCase());
+  if (!bullets.length || !factValues.length) return 0;
+  const normalizedFacts = factValues.map((value) => value.toLowerCase());
+  const grounded = bullets.filter((bullet) => normalizedFacts.some((fact) => bullet.includes(fact) || fact.includes(bullet)));
+  return grounded.length / bullets.length;
+}
+
 function extractSectionBody(markdown: string, heading: string) {
   const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const pattern = new RegExp(`${escaped}\\s*([\\s\\S]*?)(?=\\n##\\s+|$)`, "i");

@@ -185,6 +185,63 @@ a {
   gap: 8px;
 }
 
+.input-with-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.input-with-toggle input {
+  flex: 1;
+  background: #ececf0;
+  border-color: transparent;
+  padding-right: 52px;
+}
+
+.input-toggle-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  min-height: 34px;
+  width: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #5f5f66;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.input-toggle-btn:hover {
+  border: 0;
+  background: #e1e1e7;
+}
+
+.input-toggle-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.input-toggle-icon {
+  width: 24px;
+  height: 24px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .field label,
 .section-title {
   font-weight: 700;

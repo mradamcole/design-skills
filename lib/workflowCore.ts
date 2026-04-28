@@ -1,6 +1,7 @@
 import { addProgress, getSession, updateSession } from "./store";
 import { createProvider, type LlmProvider } from "./providers";
 import {
+  STATIC_BASELINE_SECTION_IDS,
   REQUIRED_SKILL_SECTIONS,
   SECTION_DEFINITION_BY_HEADING,
   SKILL_SECTION_DEFINITIONS,
@@ -9,10 +10,14 @@ import {
 } from "./skillSections";
 import {
   getCompactnessIssues,
+  getCrossSectionContaminationIssues,
+  getGroundingCoverage,
   getMissingSkillSections,
   getRepeatedSkillBullets,
   getVagueSkillPhrases
 } from "./skillQualityCore";
+import { compileSectionEvidence, normalizeObservationCategory, type CompiledSectionEvidence, type ObservationCategory } from "./sectionEvidence";
+import { validateSectionClaims } from "./sectionValidation";
 import type {
   DesignAsset,
   ProgressStepId,
@@ -29,14 +34,31 @@ type GenerationRuntimeOptions = {
   retriesPerSection?: number;
   sectionTimeoutMs?: number;
   onSkillDraftUpdate?: (markdown: string) => void;
+  sectionEvidenceCompilerEnabled?: boolean;
+  sectionEvidenceShadowEnabled?: boolean;
+  sectionClaimValidationEnabled?: boolean;
+  sectionEvidenceDiagnosticsEnabled?: boolean;
+  sectionStaticBaselinesEnabled?: boolean;
 };
 type SectionDraft = { heading: string; critique: string; revised: string };
-type SectionEvidencePacket = { section: SkillSectionDefinition; observations: SourceObservation[] };
+type SectionEvidencePacket = {
+  section: SkillSectionDefinition;
+  observations: SourceObservation[];
+  compiled?: CompiledSectionEvidence;
+  diagnostics?: string[];
+  isStaticSection?: boolean;
+};
 
 const DEFAULT_RETRIES_PER_SECTION = 1;
 const DEFAULT_SECTION_TIMEOUT_MS = 45_000;
 const USE_SECTION_FIRST_GENERATION = process.env.SECTION_FIRST_GENERATION !== "0";
+const USE_SECTION_EVIDENCE_COMPILER = process.env.SECTION_EVIDENCE_COMPILER === "1";
+const USE_SECTION_EVIDENCE_SHADOW = process.env.SECTION_EVIDENCE_SHADOW === "1";
+const USE_SECTION_CLAIM_VALIDATION = process.env.SECTION_CLAIM_VALIDATION === "1";
+const USE_SECTION_EVIDENCE_DIAGNOSTICS = process.env.SECTION_EVIDENCE_DIAGNOSTICS === "1";
+const USE_SECTION_STATIC_BASELINES = process.env.SECTION_STATIC_BASELINES !== "0";
 const MAX_EVIDENCE_LINES_PER_SECTION = 14;
+const MAX_VALIDATION_REPAIRS = 1;
 
 export async function runGeneration(
   sessionId: string,
@@ -49,6 +71,11 @@ export async function runGeneration(
   updateSession(sessionId, { providerConfig, guidance, status: "running", error: undefined });
   addProgress(sessionId, "queued", "Generation queued locally.");
   const sectionFirstEnabled = runtimeOptions?.sectionFirstEnabled ?? USE_SECTION_FIRST_GENERATION;
+  const sectionEvidenceCompilerEnabled = runtimeOptions?.sectionEvidenceCompilerEnabled ?? USE_SECTION_EVIDENCE_COMPILER;
+  const sectionEvidenceShadowEnabled = runtimeOptions?.sectionEvidenceShadowEnabled ?? USE_SECTION_EVIDENCE_SHADOW;
+  const sectionClaimValidationEnabled = runtimeOptions?.sectionClaimValidationEnabled ?? USE_SECTION_CLAIM_VALIDATION;
+  const sectionEvidenceDiagnosticsEnabled = runtimeOptions?.sectionEvidenceDiagnosticsEnabled ?? USE_SECTION_EVIDENCE_DIAGNOSTICS;
+  const sectionStaticBaselinesEnabled = runtimeOptions?.sectionStaticBaselinesEnabled ?? USE_SECTION_STATIC_BASELINES;
   if (!sectionFirstEnabled) addProgress(sessionId, "warning", "Legacy pipeline disabled; running section-first generation.");
 
   try {
@@ -82,11 +109,42 @@ export async function runGeneration(
     });
     const observations = parseObservations(rawExtraction, usableAssets);
     addProgress(sessionId, "synthesizing_rules", "Planning section-specific evidence packets.", { stepId: "plan_sections" });
-    const sectionEvidence = buildSectionEvidence(observations);
+    const compiledEvidence = compileSectionEvidence(observations, usableAssets);
+    const sectionEvidence = buildSectionEvidence(observations, compiledEvidence, {
+      useCompiled: sectionEvidenceCompilerEnabled,
+      shadowCompiled: sectionEvidenceShadowEnabled,
+      staticBaselines: sectionStaticBaselinesEnabled
+    });
+    if (sectionEvidenceDiagnosticsEnabled) {
+      const summary = compiledEvidence
+        .map((packet) => `${packet.section.id}: facts=${packet.facts.length}, selected=${packet.selectedFacts.length}, conflicts=${packet.conflicts.length}, unknowns=${packet.unknowns.length}`)
+        .join(" | ");
+      addProgress(sessionId, "synthesizing_rules", `Section evidence diagnostics: ${summary}`.slice(0, 600), { stepId: "plan_sections" });
+    }
     const sectionDrafts: SectionDraft[] = [];
 
     for (const packet of sectionEvidence) {
       const sectionLabel = packet.section.heading.replace(/^##\s*/, "");
+      if (packet.isStaticSection) {
+        const staticBody = buildStaticSectionBody(packet.section);
+        sectionDrafts.push({
+          heading: packet.section.heading,
+          critique: "Static baseline section; generation skipped.",
+          revised: normalizeSectionBody(packet.section.heading, staticBody, packet.section.target.maxBullets)
+        });
+        const partialMarkdown = buildIncrementalSkillMarkdown(sectionDrafts);
+        updateSession(sessionId, {
+          skillDraft: {
+            markdown: partialMarkdown,
+            observations,
+            qualityNotes: sectionDrafts
+              .map((section) => `${section.heading}: ${splitLines(section.critique)[0] || "No critique notes."}`)
+              .slice(0, 12)
+          }
+        });
+        runtimeOptions?.onSkillDraftUpdate?.(partialMarkdown);
+        continue;
+      }
       const draft = await runStepWithRetry(
         () =>
           runStreamedStep({
@@ -97,7 +155,7 @@ export async function runGeneration(
             stepType: "drafting_skill",
             message: `Drafting ${sectionLabel}.`,
             run: (handlers) =>
-              provider.generateTextStream(buildSectionPrompt(packet.section, packet.observations, guidance), handlers),
+              provider.generateTextStream(buildSectionPrompt(packet, guidance), handlers),
             usageTotals
           }),
         runtimeOptions?.retriesPerSection ?? DEFAULT_RETRIES_PER_SECTION,
@@ -113,7 +171,7 @@ export async function runGeneration(
             stepType: "critiquing_skill",
             message: `Critiquing ${sectionLabel}.`,
             run: (handlers) =>
-              provider.generateTextStream(buildSectionCritiquePrompt(packet.section, draft, packet.observations), handlers),
+              provider.generateTextStream(buildSectionCritiquePrompt(packet, draft), handlers),
             usageTotals
           }),
         runtimeOptions?.retriesPerSection ?? DEFAULT_RETRIES_PER_SECTION,
@@ -129,16 +187,27 @@ export async function runGeneration(
             stepType: "critiquing_skill",
             message: `Revising ${sectionLabel}.`,
             run: (handlers) =>
-              provider.generateTextStream(buildSectionRevisionPrompt(packet.section, draft, critique), handlers),
+              provider.generateTextStream(buildSectionRevisionPrompt(packet, draft, critique), handlers),
             usageTotals
           }),
         runtimeOptions?.retriesPerSection ?? DEFAULT_RETRIES_PER_SECTION,
         runtimeOptions?.sectionTimeoutMs ?? DEFAULT_SECTION_TIMEOUT_MS
       );
+      const validatedRevision = await validateSectionRevision({
+        sectionClaimValidationEnabled,
+        packet,
+        revised,
+        provider,
+        sessionId,
+        providerConfig,
+        usageTotals,
+        retriesPerSection: runtimeOptions?.retriesPerSection ?? DEFAULT_RETRIES_PER_SECTION,
+        sectionTimeoutMs: runtimeOptions?.sectionTimeoutMs ?? DEFAULT_SECTION_TIMEOUT_MS
+      });
       sectionDrafts.push({
         heading: packet.section.heading,
         critique,
-        revised: normalizeSectionBody(packet.section.heading, revised, packet.section.target.maxBullets)
+        revised: normalizeSectionBody(packet.section.heading, validatedRevision, packet.section.target.maxBullets)
       });
       const partialMarkdown = buildIncrementalSkillMarkdown(sectionDrafts);
       updateSession(sessionId, {
@@ -171,7 +240,7 @@ export async function runGeneration(
       runtimeOptions?.sectionTimeoutMs ?? DEFAULT_SECTION_TIMEOUT_MS
     );
     const markdown = normalizeSkillMarkdown(finalizedMarkdown);
-    const qualityNotes = buildQualityNotes(markdown, sectionDrafts);
+    const qualityNotes = buildQualityNotes(markdown, sectionDrafts, compiledEvidence);
 
     const sampleHtml = await runStreamedStep({
       sessionId,
@@ -294,10 +363,39 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
   }
 }
 
-function buildSectionEvidence(observations: SourceObservation[]): SectionEvidencePacket[] {
+function buildSectionEvidence(
+  observations: SourceObservation[],
+  compiled: CompiledSectionEvidence[],
+  options: { useCompiled: boolean; shadowCompiled: boolean; staticBaselines: boolean }
+): SectionEvidencePacket[] {
   return SKILL_SECTION_DEFINITIONS.map((section) => {
-    const candidates = observations.filter((observation) => observation.confidence !== "low" && section.evidenceCategories.includes(observation.category));
-    return { section, observations: (candidates.length ? candidates : observations).slice(0, MAX_EVIDENCE_LINES_PER_SECTION) };
+    const compiledPacket = compiled.find((entry) => entry.section.id === section.id);
+    const staticSection = options.staticBaselines && STATIC_BASELINE_SECTION_IDS.includes(section.id);
+    const compiledObservations =
+      compiledPacket?.selectedFacts.map((fact) => ({
+        assetId: fact.sourceAssetIds[0] || "compiled",
+        assetName: fact.sourceAssetNames[0] || "Compiled evidence",
+        category: fact.category,
+        observation: `${fact.kind}: ${fact.value}`,
+        confidence: fact.confidence
+      })) || [];
+    const categoryFiltered = observations.filter(
+      (observation) =>
+        observation.confidence !== "low" && section.evidenceCategories.includes(normalizeObservationCategory(observation.category))
+    );
+    const chosen = options.useCompiled && compiledObservations.length ? compiledObservations : categoryFiltered.length ? categoryFiltered : observations;
+    const diagnostics: string[] = [];
+    if (options.shadowCompiled && compiledPacket) {
+      diagnostics.push(`compiled_selected=${compiledPacket.selectedFacts.length}`);
+      diagnostics.push(`legacy_selected=${categoryFiltered.length}`);
+    }
+    return {
+      section,
+      observations: chosen.slice(0, MAX_EVIDENCE_LINES_PER_SECTION),
+      compiled: compiledPacket,
+      diagnostics,
+      isStaticSection: staticSection
+    };
   });
 }
 function assembleSkillMarkdown(sectionDrafts: SectionDraft[]) {
@@ -323,7 +421,7 @@ function buildIncrementalSkillMarkdown(sectionDrafts: SectionDraft[]) {
   });
   return `${SKILL_TITLE}\n\n${blocks.join("\n\n")}`;
 }
-function buildQualityNotes(markdown: string, sectionDrafts: SectionDraft[]) {
+function buildQualityNotes(markdown: string, sectionDrafts: SectionDraft[], compiledEvidence: CompiledSectionEvidence[]) {
   const notes = sectionDrafts.map((section) => `${section.heading}: ${splitLines(section.critique)[0] || "No critique notes."}`);
   const missing = getMissingSkillSections(markdown);
   if (missing.length) notes.push(`Missing sections: ${missing.join(", ")}`);
@@ -332,6 +430,10 @@ function buildQualityNotes(markdown: string, sectionDrafts: SectionDraft[]) {
   const repeated = getRepeatedSkillBullets(markdown);
   if (repeated.length) notes.push(`Repeated bullets: ${repeated.slice(0, 3).join(" | ")}`);
   notes.push(...getCompactnessIssues(markdown).slice(0, 3));
+  notes.push(...getCrossSectionContaminationIssues(markdown).slice(0, 2));
+  const factValues = compiledEvidence.flatMap((packet) => packet.selectedFacts.map((fact) => fact.normalizedValue));
+  const groundingCoverage = getGroundingCoverage(markdown, factValues);
+  if (groundingCoverage > 0) notes.push(`Grounding coverage: ${(groundingCoverage * 100).toFixed(0)}%`);
   return notes.slice(0, 12);
 }
 
@@ -356,26 +458,48 @@ Optional user guidance: ${guidance || "none"}
 Synthesis:
 ${synthesis}`;
 }
-function buildSectionPrompt(section: SkillSectionDefinition, observations: SourceObservation[], guidance?: string) {
+function buildSectionPrompt(packet: SectionEvidencePacket, guidance?: string) {
+  const { section, observations, compiled } = packet;
   const evidence = observations.map((item) => `- [${item.category}/${item.confidence}] ${item.assetName}: ${item.observation}`).join("\n") || "- No reliable evidence.";
   const target = section.target;
-  return `Write only ${section.heading}.
+  const facts = compiled?.selectedFacts || [];
+  const conflicts = compiled?.conflicts || [];
+  const unknowns = compiled?.unknowns || [];
+  const factLines = facts.length
+    ? facts.map((fact) => `- fact_id=${fact.factId}; kind=${fact.kind}; confidence=${fact.confidence}; value=${fact.value}`).join("\n")
+    : "- None";
+  const conflictLines = conflicts.length
+    ? conflicts.map((conflict) => `- ${conflict.kind}: ${conflict.values.join(" | ")}`).join("\n")
+    : "- None";
+  const unknownLines = unknowns.length ? unknowns.map((unknown) => `- ${unknown}`).join("\n") : "- None";
+  return `Required heading: ${section.heading}
 Intent: ${section.intent}
 At least ${target.minBullets || 1} bullets. At most ${target.maxBullets || 8}. ${target.maxCharsPerBullet ? `Each bullet <= ${target.maxCharsPerBullet} chars.` : ""}
-Do not invent details. If sparse evidence: ${section.emptyEvidencePolicy}
+Use only evidence-backed claims. Every bullet must map to one or more fact_id values when available.
+If sparse evidence: ${section.emptyEvidencePolicy}
 Optional user guidance: ${guidance || "none"}
-Evidence:
+Top Facts:
+${factLines}
+Conflicts:
+${conflictLines}
+Unknowns:
+${unknownLines}
+Observed Evidence:
 ${evidence}`;
 }
-function buildSectionCritiquePrompt(section: SkillSectionDefinition, draftSection: string, observations: SourceObservation[]) {
-  return `Critique ${section.heading} for unsupported claims, vagueness, repetition, and bullet-length violations.
+function buildSectionCritiquePrompt(packet: SectionEvidencePacket, draftSection: string) {
+  const section = packet.section;
+  const evidence = packet.compiled?.selectedFacts.length
+    ? packet.compiled.selectedFacts.map((fact) => `- ${fact.value}`).join("\n")
+    : packet.observations.map((item) => `- ${item.assetName}: ${item.observation}`).join("\n") || "- none";
+  return `Critique this section ${section.heading} for unsupported claims, vagueness, repetition, and bullet-length violations.
 Evidence:
-${observations.map((item) => `- ${item.assetName}: ${item.observation}`).join("\n") || "- none"}
+${evidence}
 Draft:
 ${draftSection}`;
 }
-function buildSectionRevisionPrompt(section: SkillSectionDefinition, draftSection: string, critique: string) {
-  return `Revise ${section.heading} using critique. Output only markdown section. No new facts.
+function buildSectionRevisionPrompt(packet: SectionEvidencePacket, draftSection: string, critique: string) {
+  return `Revise this section ${packet.section.heading} using critique. Return only markdown for ${packet.section.heading}. No new facts.
 Draft:
 ${draftSection}
 Critique:
@@ -399,6 +523,33 @@ Existing SKILL.md:
 ${existingSkill}`;
 }
 
+function buildStaticSectionBody(section: SkillSectionDefinition) {
+  switch (section.id) {
+    case "when_to_use":
+      return [
+        "- Use this skill when implementing UI that should follow extracted design-system constraints.",
+        "- Prioritize fidelity to evidenced tokens, component behavior, and accessibility patterns.",
+        "- Avoid adding brand-specific details unless they are explicitly evidenced."
+      ].join("\n");
+    case "workflow":
+      return [
+        "- Gather references and extract concrete observations before drafting section guidance.",
+        "- Convert observations into enforceable rules with explicit constraints and fallback language.",
+        "- Validate section claims against evidence, then remove unsupported or repetitive bullets.",
+        "- Assemble sections in canonical order and run compactness/consistency checks."
+      ].join("\n");
+    case "verification_checklist":
+      return [
+        "- Confirm required sections are present and ordered correctly.",
+        "- Verify concrete tokens and values are grounded in extracted evidence.",
+        "- Check for section contamination (e.g., colors in typography guidance).",
+        "- Ensure accessibility and interaction-state guidance is explicit and testable."
+      ].join("\n");
+    default:
+      return section.emptyEvidencePolicy;
+  }
+}
+
 function parseObservations(raw: string, assets: DesignAsset[]): SourceObservation[] {
   const lines = splitLines(raw).slice(0, 180);
   const observations: SourceObservation[] = [];
@@ -414,7 +565,7 @@ function parseObservations(raw: string, assets: DesignAsset[]): SourceObservatio
     observations.push({
       assetId: asset.id,
       assetName: asset.name,
-      category: normalizeCategory(match.groups.category),
+      category: normalizeObservationCategory(match.groups.category),
       observation: match.groups.observation.trim(),
       confidence: normalizeConfidence(match.groups.confidence)
     });
@@ -424,6 +575,52 @@ function parseObservations(raw: string, assets: DesignAsset[]): SourceObservatio
     const asset = assets[index % assets.length];
     return { assetId: asset.id, assetName: asset.name, category: inferCategory(line), observation: line.replace(/^[-*]\s*/, ""), confidence: "medium" };
   });
+}
+
+async function validateSectionRevision(args: {
+  sectionClaimValidationEnabled: boolean;
+  packet: SectionEvidencePacket;
+  revised: string;
+  provider: LlmProvider;
+  sessionId: string;
+  providerConfig: ProviderConfig;
+  usageTotals: TokenUsage;
+  retriesPerSection: number;
+  sectionTimeoutMs: number;
+}) {
+  const { sectionClaimValidationEnabled, packet } = args;
+  if (!sectionClaimValidationEnabled || !packet.compiled) return args.revised;
+  let latest = args.revised;
+  let attempts = 0;
+  while (attempts <= MAX_VALIDATION_REPAIRS) {
+    const validation = validateSectionClaims(packet.section, latest, packet.compiled);
+    if (validation.isValid) return latest;
+    const blockingIssues = validation.issues.filter((issue) => issue.severity === "error");
+    if (!blockingIssues.length) return latest;
+    if (attempts >= MAX_VALIDATION_REPAIRS) return latest;
+    const repaired = await runStepWithRetry(
+      () =>
+        runStreamedStep({
+          sessionId: args.sessionId,
+          providerConfig: args.providerConfig,
+          providerSupportsReasoning: args.provider.supportsReasoningStream,
+          stepId: "revise_section",
+          stepType: "critiquing_skill",
+          message: `Repairing ${packet.section.heading.replace(/^##\s*/, "")} after validation.`,
+          run: (handlers) =>
+            args.provider.generateTextStream(
+              `Repair ${packet.section.heading}. Fix these issues and output only markdown section:\n${blockingIssues.map((issue) => `- ${issue.message}`).join("\n")}\nDraft:\n${latest}`,
+              handlers
+            ),
+          usageTotals: args.usageTotals
+        }),
+      args.retriesPerSection,
+      args.sectionTimeoutMs
+    );
+    latest = repaired;
+    attempts += 1;
+  }
+  return latest;
 }
 
 function parseVerificationReport(text: string): VerificationReport {
@@ -500,22 +697,13 @@ function splitLines(text: string) {
     .map((line) => line.trim())
     .filter(Boolean);
 }
-function inferCategory(line: string) {
+function inferCategory(line: string): ObservationCategory {
   const lower = line.toLowerCase();
   if (lower.includes("color") || lower.includes("palette") || lower.includes("token")) return "color";
   if (lower.includes("type") || lower.includes("font")) return "typography";
   if (lower.includes("layout") || lower.includes("grid")) return "layout";
   if (lower.includes("button") || lower.includes("card") || lower.includes("component")) return "components";
   if (lower.includes("access") || lower.includes("contrast")) return "accessibility";
-  return "visual language";
-}
-function normalizeCategory(category: string) {
-  const value = category.trim().toLowerCase();
-  if (value.includes("color")) return "color";
-  if (value.includes("type") || value.includes("font")) return "typography";
-  if (value.includes("layout") || value.includes("grid")) return "layout";
-  if (value.includes("component") || value.includes("pattern")) return "components";
-  if (value.includes("access")) return "accessibility";
   return "visual language";
 }
 function normalizeConfidence(confidence: string): SourceObservation["confidence"] {

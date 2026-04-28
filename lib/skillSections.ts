@@ -15,6 +15,10 @@ export interface SkillSectionDefinition {
   heading: `## ${string}`;
   intent: string;
   evidenceCategories: string[];
+  allowedFactKinds?: string[];
+  disallowedFactKinds?: string[];
+  priorityFactKinds?: string[];
+  claimRisk?: "low" | "medium" | "high";
   target: {
     minBullets?: number;
     maxBullets?: number;
@@ -109,6 +113,7 @@ export const SKILL_SECTION_DEFINITIONS: SkillSectionDefinition[] = [
 ];
 
 export const REQUIRED_SKILL_SECTIONS = SKILL_SECTION_DEFINITIONS.map((section) => section.heading);
+export const STATIC_BASELINE_SECTION_IDS: SkillSectionId[] = ["when_to_use", "workflow", "verification_checklist"];
 
 export const SECTION_INTENTS: Record<string, string> = Object.fromEntries(
   SKILL_SECTION_DEFINITIONS.map((section) => [section.heading, section.intent])

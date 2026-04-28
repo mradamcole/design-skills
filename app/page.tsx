@@ -51,6 +51,7 @@ export default function Home() {
   const [providerKind, setProviderKind] = useState<ProviderKind>("openai");
   const [model, setModel] = useState("gpt-4o-mini");
   const [apiKey, setApiKey] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
   const [baseUrl, setBaseUrl] = useState("http://localhost:11434");
   const [openaiModels, setOpenaiModels] = useState<OpenAIModelOption[]>([]);
   const [openaiModelsLoading, setOpenaiModelsLoading] = useState(false);
@@ -799,13 +800,50 @@ export default function Home() {
             {providerKind === "openai" ? (
               <div className="field">
                 <label htmlFor="api-key">API key</label>
-                <input
-                  id="api-key"
-                  type="password"
-                  value={apiKey}
-                  onChange={(event) => setApiKey(event.target.value)}
-                  placeholder="sk-..."
-                />
+                <div className="input-with-toggle">
+                  <input
+                    id="api-key"
+                    type={showApiKey ? "text" : "password"}
+                    value={apiKey}
+                    onChange={(event) => setApiKey(event.target.value)}
+                    placeholder="sk-..."
+                  />
+                  <button
+                    type="button"
+                    className="input-toggle-btn"
+                    onClick={() => setShowApiKey((current) => !current)}
+                    aria-label={showApiKey ? "Conceal API key" : "Show API key"}
+                    aria-pressed={showApiKey}
+                  >
+                    <span className="sr-only">{showApiKey ? "Hide API key" : "Show API key"}</span>
+                    {showApiKey ? (
+                      <svg className="input-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path
+                          d="M2 12C3.8 8.6 7.4 6 12 6c4.6 0 8.2 2.6 10 6-1.8 3.4-5.4 6-10 6-4.6 0-8.2-2.6-10-6Z"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                        <circle cx="12" cy="12" r="2.8" fill="none" stroke="currentColor" strokeWidth="2" />
+                      </svg>
+                    ) : (
+                      <svg className="input-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path
+                          d="M2 12C3.8 8.6 7.4 6 12 6c4.6 0 8.2 2.6 10 6-1.8 3.4-5.4 6-10 6-4.6 0-8.2-2.6-10-6Z"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                        <circle cx="12" cy="12" r="2.8" fill="none" stroke="currentColor" strokeWidth="2" />
+                        <line x1="4" y1="20" x2="20" y2="4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="field">
