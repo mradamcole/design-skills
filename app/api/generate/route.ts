@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { runGeneration } from "@/lib/workflow";
+import { runGeneration } from "@/lib/workflowCore";
 import { getSession } from "@/lib/store";
 import type { ProviderConfig } from "@/lib/types";
 

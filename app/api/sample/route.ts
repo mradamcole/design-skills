@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { generateSampleFromSkill } from "@/lib/workflow";
+import { generateSampleFromSkill } from "@/lib/workflowCore";
 import { getSession, updateSession } from "@/lib/store";
 import type { ProviderConfig } from "@/lib/types";
 

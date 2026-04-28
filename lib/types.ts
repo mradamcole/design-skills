@@ -22,10 +22,12 @@ export type ProgressType =
 
 export type ProgressStepId =
   | "extract_observations"
-  | "synthesize_rules"
-  | "draft_skill"
-  | "critique_skill"
-  | "revise_skill"
+  | "plan_sections"
+  | "draft_section"
+  | "critique_section"
+  | "revise_section"
+  | "assemble_skill"
+  | "finalize_skill"
   | "generate_sample"
   | "verify_skill";
 

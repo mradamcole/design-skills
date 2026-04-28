@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/store";
-import { runVerification } from "@/lib/workflow";
+import { runVerification } from "@/lib/workflowCore";
 import type { ProviderConfig } from "@/lib/types";
 
 export async function POST(request: Request) {

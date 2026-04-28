@@ -470,6 +470,7 @@ export default function Home() {
         if (parsedEvent.stepId) {
           setStepTokenUsage((current) => ({ ...current, [parsedEvent.stepId as string]: parsedEvent.tokenUsage as TokenUsage }));
         }
+        setTokenTotals((current) => mergeTokenUsage(current, parsedEvent.tokenUsage as TokenUsage));
         if (typeof parsedEvent.providerMeta?.loadDurationMs === "number") {
           setLastLoadDurationMs(parsedEvent.providerMeta.loadDurationMs);
         }
@@ -1170,10 +1171,12 @@ function appendWithLimit(current: string, nextChunk: string, limit = 12_000) {
 function labelForStep(stepId: ProgressStepId | null) {
   if (!stepId) return "Waiting for first stream event";
   if (stepId === "extract_observations") return "Extract observations";
-  if (stepId === "synthesize_rules") return "Synthesize rules";
-  if (stepId === "draft_skill") return "Draft skill";
-  if (stepId === "critique_skill") return "Critique skill";
-  if (stepId === "revise_skill") return "Revise skill";
+  if (stepId === "plan_sections") return "Plan sections";
+  if (stepId === "draft_section") return "Draft section";
+  if (stepId === "critique_section") return "Critique section";
+  if (stepId === "revise_section") return "Revise section";
+  if (stepId === "assemble_skill") return "Assemble skill";
+  if (stepId === "finalize_skill") return "Finalize skill";
   if (stepId === "generate_sample") return "Generate sample";
   return "Verify skill";
 }
@@ -1186,6 +1189,22 @@ function formatTokenUsage(usage?: TokenUsage, approxCostPer1M?: number) {
   const estimate = typeof approxCostPer1M === "number" ? (total / 1_000_000) * approxCostPer1M : null;
   const costSegment = estimate !== null ? ` · $ ${estimate.toFixed(4)}` : "";
   return `i ${prompt.toLocaleString()} · o ${completion.toLocaleString()} · t ${total.toLocaleString()}${costSegment}`;
+}
+
+function mergeTokenUsage(current: TokenUsage, next: TokenUsage): TokenUsage {
+  const merged: TokenUsage = { ...current };
+  if (typeof next.promptTokens === "number") {
+    merged.promptTokens = (merged.promptTokens || 0) + next.promptTokens;
+  }
+  if (typeof next.completionTokens === "number") {
+    merged.completionTokens = (merged.completionTokens || 0) + next.completionTokens;
+  }
+  if (typeof next.totalTokens === "number") {
+    merged.totalTokens = (merged.totalTokens || 0) + next.totalTokens;
+  } else if (typeof next.promptTokens === "number" || typeof next.completionTokens === "number") {
+    merged.totalTokens = (merged.totalTokens || 0) + (next.promptTokens || 0) + (next.completionTokens || 0);
+  }
+  return merged;
 }
 
 function isTimelineEvent(event: ProgressEvent) {

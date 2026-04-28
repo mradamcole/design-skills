@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { buildExtractionPrompt, buildSkillPrompt, buildSynthesisPrompt } from "@/lib/workflow";
+import { buildExtractionPrompt, buildSkillPrompt, buildSynthesisPrompt } from "@/lib/workflowCore";
 
 describe("workflow prompts", () => {
   it("asks extraction to preserve concrete design evidence", () => {
     const prompt = buildExtractionPrompt("prioritize website identity");
 
-    expect(prompt).toContain("Icons, Favicons, And Imagery");
+    expect(prompt).toContain("category=<one of color|typography|layout|components|accessibility|visual language>");
+    expect(prompt).toContain("confidence=<high|medium|low>");
     expect(prompt).toContain("font families");
-    expect(prompt).toContain("CSS custom properties");
-    expect(prompt).toContain("icon/favicon paths");
-    expect(prompt).toContain("Weak Or Uncertain Inferences");
+    expect(prompt).toContain("CSS variables");
+    expect(prompt).toContain("Keep each bullet under 180 characters");
     expect(prompt).toContain("prioritize website identity");
   });
 
@@ -17,11 +17,10 @@ describe("workflow prompts", () => {
     const synthesisPrompt = buildSynthesisPrompt("Typography: Inter. Color: --brand #2563eb.");
     const skillPrompt = buildSkillPrompt("Use Inter and --brand #2563eb.");
 
-    expect(synthesisPrompt).toContain("Preserve high-confidence tokens");
-    expect(synthesisPrompt).toContain("icons/favicon/assets");
+    expect(synthesisPrompt).toContain("### High Confidence");
+    expect(synthesisPrompt).toContain("Keep each bullet under 180 characters");
     expect(skillPrompt).toContain("## Verification Checklist");
-    expect(skillPrompt).toContain("Color and tokens");
-    expect(skillPrompt).toContain("Icons, favicon, and imagery");
-    expect(skillPrompt).toContain("Verification: checks that compare output against concrete values");
+    expect(skillPrompt).toContain("## Brand");
+    expect(skillPrompt).toContain("Keep output concise and grounded in evidence");
   });
 });
