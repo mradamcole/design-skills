@@ -49,6 +49,12 @@ type SectionEvidencePacket = {
   isStaticSection?: boolean;
 };
 
+function buildSectionQualityNotes(sectionDrafts: SectionDraft[]) {
+  return sectionDrafts
+    .map((section) => `${section.heading}: ${splitLines(section.critique)[0] || "No critique notes."}`)
+    .slice(0, 12);
+}
+
 const DEFAULT_RETRIES_PER_SECTION = 1;
 const DEFAULT_SECTION_TIMEOUT_MS = 45_000;
 const USE_SECTION_FIRST_GENERATION = process.env.SECTION_FIRST_GENERATION !== "0";
@@ -133,14 +139,21 @@ export async function runGeneration(
           revised: normalizeSectionBody(packet.section.heading, staticBody, packet.section.target.maxBullets)
         });
         const partialMarkdown = buildIncrementalSkillMarkdown(sectionDrafts);
+        const qualityNotes = buildSectionQualityNotes(sectionDrafts);
         updateSession(sessionId, {
           skillDraft: {
             markdown: partialMarkdown,
             observations,
-            qualityNotes: sectionDrafts
-              .map((section) => `${section.heading}: ${splitLines(section.critique)[0] || "No critique notes."}`)
-              .slice(0, 12)
+            qualityNotes
           }
+        });
+        addProgress(sessionId, "drafting_skill", `Updated SKILL.md with ${sectionLabel}.`, {
+          stepId: "draft_section",
+          streamKind: "status",
+          partialMarkdown,
+          sectionHeading: sectionLabel,
+          completedSections: sectionDrafts.length,
+          totalSections: REQUIRED_SKILL_SECTIONS.length
         });
         runtimeOptions?.onSkillDraftUpdate?.(partialMarkdown);
         continue;
@@ -210,20 +223,35 @@ export async function runGeneration(
         revised: normalizeSectionBody(packet.section.heading, validatedRevision, packet.section.target.maxBullets)
       });
       const partialMarkdown = buildIncrementalSkillMarkdown(sectionDrafts);
+      const qualityNotes = buildSectionQualityNotes(sectionDrafts);
       updateSession(sessionId, {
         skillDraft: {
           markdown: partialMarkdown,
           observations,
-          qualityNotes: sectionDrafts
-            .map((section) => `${section.heading}: ${splitLines(section.critique)[0] || "No critique notes."}`)
-            .slice(0, 12)
+          qualityNotes
         }
+      });
+      addProgress(sessionId, "drafting_skill", `Updated SKILL.md with ${sectionLabel}.`, {
+        stepId: "revise_section",
+        streamKind: "status",
+        partialMarkdown,
+        sectionHeading: sectionLabel,
+        completedSections: sectionDrafts.length,
+        totalSections: REQUIRED_SKILL_SECTIONS.length
       });
       runtimeOptions?.onSkillDraftUpdate?.(partialMarkdown);
     }
 
     addProgress(sessionId, "drafting_skill", "Assembling SKILL.md from section outputs.", { stepId: "assemble_skill" });
     const assembledMarkdown = assembleSkillMarkdown(sectionDrafts);
+    addProgress(sessionId, "drafting_skill", "Assembled SKILL.md section draft.", {
+      stepId: "assemble_skill",
+      streamKind: "status",
+      partialMarkdown: assembledMarkdown,
+      sectionHeading: "Assemble skill",
+      completedSections: REQUIRED_SKILL_SECTIONS.length,
+      totalSections: REQUIRED_SKILL_SECTIONS.length
+    });
     const finalizedMarkdown = await runStepWithRetry(
       () =>
         runStreamedStep({

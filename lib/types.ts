@@ -89,6 +89,10 @@ export interface ProgressEvent {
   stepId?: ProgressStepId;
   streamKind?: StreamKind;
   textDelta?: string;
+  partialMarkdown?: string;
+  sectionHeading?: string;
+  completedSections?: number;
+  totalSections?: number;
   tokenUsage?: TokenUsage;
   providerMeta?: {
     provider?: ProviderKind;

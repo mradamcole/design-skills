@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { resolveApproxCostPer1M } from "@/lib/openaiModels";
+import { SKILL_SECTION_DEFINITIONS, STATIC_BASELINE_SECTION_IDS } from "@/lib/skillSections";
 import type {
   DesignAsset,
   GenerationSession,
@@ -37,6 +38,22 @@ Use this skill when generating or reviewing interfaces for this design system.
 - Reference generated sample outputs when judging whether the skill is specific enough.
 `;
 
+type GenerationMilestone = { percent: number; label: string };
+
+const GENERATION_BASELINE_MILESTONES: Partial<Record<ProgressStepId, GenerationMilestone>> = {
+  extract_observations: { percent: 2, label: "Extracting observations" },
+  plan_sections: { percent: 3, label: "Planning section evidence" },
+  finalize_skill: { percent: 85, label: "Running final consistency pass" },
+  generate_sample: { percent: 85, label: "Generating sample output" }
+};
+const SECTION_STEP_IDS: ProgressStepId[] = ["draft_section", "critique_section", "revise_section"];
+const SECTION_PROGRESS_START_PERCENT = 3;
+const SECTION_PROGRESS_END_PERCENT = 74;
+const DYNAMIC_SECTION_COUNT = Math.max(1, SKILL_SECTION_DEFINITIONS.length - STATIC_BASELINE_SECTION_IDS.length);
+const TOTAL_SECTION_PROGRESS_UNITS = DYNAMIC_SECTION_COUNT * SECTION_STEP_IDS.length + 1; // +1 for assemble_skill
+const TIMELINE_PROGRESS_INCREMENT = 0.8;
+const TIMELINE_PROGRESS_CEILING = 99;
+
 export default function Home() {
   type RunState = "idle" | "running" | "complete" | "error";
   type BundleAssetMode = "reference" | "download";
@@ -47,7 +64,9 @@ export default function Home() {
     | { id: string; kind: "summary"; summary: { durationMs: number; usage?: TokenUsage; endedAt: number } }
     | { id: string; kind: "boundary"; label: string; startedAt: number };
   const [session, setSession] = useState<GenerationSession | null>(null);
-  const [activeTab, setActiveTab] = useState<"edit" | "sample" | "verify">("edit");
+  const [activeTab, setActiveTab] = useState<"edit" | "verify">("edit");
+  const [railTab, setRailTab] = useState<"assets" | "settings">("assets");
+  const [editViewTab, setEditViewTab] = useState<"markdown" | "preview" | "sample">("markdown");
   const [providerKind, setProviderKind] = useState<ProviderKind>("openai");
   const [model, setModel] = useState("gpt-4o-mini");
   const [apiKey, setApiKey] = useState("");
@@ -84,6 +103,8 @@ export default function Home() {
   const [lastRunSummary, setLastRunSummary] = useState<{ durationMs: number; usage?: TokenUsage; endedAt: number } | null>(null);
   const [streamPhase, setStreamPhase] = useState("Waiting to start.");
   const [lastLoadDurationMs, setLastLoadDurationMs] = useState<number | null>(null);
+  const [runProgressPercent, setRunProgressPercent] = useState(0);
+  const [runMilestoneLabel, setRunMilestoneLabel] = useState("Waiting to start");
   const [memoryReady, setMemoryReady] = useState(false);
   const [sampleSyncStatus, setSampleSyncStatus] = useState<"empty" | "synced" | "stale" | "refreshing" | "error">("empty");
   const [lastSampleMarkdown, setLastSampleMarkdown] = useState("");
@@ -96,6 +117,12 @@ export default function Home() {
   const saveDebounceRef = useRef<number | null>(null);
   const savePromiseRef = useRef<Promise<boolean> | null>(null);
   const savedSkillRef = useRef(defaultSkill);
+  const sectionProgressUnitsRef = useRef(0);
+  const sectionProgressSeenIdsRef = useRef<Set<string>>(new Set());
+  const timelineProgressSeenIdsRef = useRef<Set<string>>(new Set());
+  const runModeRef = useRef<"generate" | "verify" | null>(null);
+  const runStartedAtRef = useRef<number | null>(null);
+  const tokenTotalsRef = useRef<TokenUsage>({});
 
   useEffect(() => {
     void loadSettingsMemory();
@@ -253,6 +280,18 @@ export default function Home() {
       window.clearInterval(intervalId);
     };
   }, [runState]);
+
+  useEffect(() => {
+    runModeRef.current = runMode;
+  }, [runMode]);
+
+  useEffect(() => {
+    runStartedAtRef.current = runStartedAt;
+  }, [runStartedAt]);
+
+  useEffect(() => {
+    tokenTotalsRef.current = tokenTotals;
+  }, [tokenTotals]);
 
   useEffect(() => {
     scrollToBottom(logRef.current);
@@ -452,8 +491,13 @@ export default function Home() {
     const events = new EventSource(`/api/progress/${sessionId}`);
     events.addEventListener("progress", (event) => {
       const parsedEvent = JSON.parse((event as MessageEvent).data) as ProgressEvent;
-      if (isTimelineEvent(parsedEvent)) {
+      const timelineEvent = isTimelineEvent(parsedEvent);
+      if (timelineEvent) {
         setUiLog((current) => [...current, { id: parsedEvent.id, kind: "event", event: parsedEvent }]);
+        if (runModeRef.current === "generate" && !timelineProgressSeenIdsRef.current.has(parsedEvent.id)) {
+          timelineProgressSeenIdsRef.current.add(parsedEvent.id);
+          setRunProgressPercent((current) => Math.min(TIMELINE_PROGRESS_CEILING, current + TIMELINE_PROGRESS_INCREMENT));
+        }
       }
       setCurrentStage(parsedEvent.type);
       if (parsedEvent.streamKind !== "content" && parsedEvent.streamKind !== "reasoning" && parsedEvent.streamKind !== "usage") {
@@ -486,6 +530,27 @@ export default function Home() {
           );
         } else {
           setStreamPhase("Generating output...");
+        }
+      }
+      if (parsedEvent.partialMarkdown) {
+        setSkillMarkdown(parsedEvent.partialMarkdown);
+        savedSkillRef.current = parsedEvent.partialMarkdown;
+        setSaveState("saved");
+      }
+      if (runModeRef.current === "generate") {
+        const sectionProgress = getSectionStepProgress(parsedEvent, sectionProgressSeenIdsRef.current);
+        if (sectionProgress) {
+          sectionProgressUnitsRef.current = Math.min(TOTAL_SECTION_PROGRESS_UNITS, sectionProgressUnitsRef.current + 1);
+          const percent = getSectionProgressPercent(sectionProgressUnitsRef.current);
+          setRunMilestoneLabel(`${sectionProgress.label} (${sectionProgressUnitsRef.current}/${TOTAL_SECTION_PROGRESS_UNITS})`);
+          setRunProgressPercent((current) => Math.max(current, percent));
+          return;
+        }
+
+        const milestone = getGenerationMilestone(parsedEvent);
+        if (milestone) {
+          setRunMilestoneLabel(milestone.label);
+          setRunProgressPercent((current) => Math.max(current, milestone.percent));
         }
       }
     });
@@ -552,7 +617,9 @@ export default function Home() {
     setLastRunSummary(null);
     setRunState("running");
     setRunMode(mode);
+    runModeRef.current = mode;
     setRunStartedAt(now);
+    runStartedAtRef.current = now;
     setLastEventAt(now);
     setCurrentStage("queued");
     setLastMessage(mode === "generate" ? "Starting skill generation..." : "Starting skill verification...");
@@ -562,9 +629,15 @@ export default function Home() {
     setReasoningContent("");
     setReasoningAvailable(false);
     setTokenTotals({});
+    tokenTotalsRef.current = {};
     setStepTokenUsage({});
     setStreamPhase("Contacting provider...");
     setLastLoadDurationMs(null);
+    setRunProgressPercent(mode === "generate" ? 1 : 0);
+    setRunMilestoneLabel(mode === "generate" ? "Queued" : "Verification started");
+    sectionProgressUnitsRef.current = 0;
+    sectionProgressSeenIdsRef.current = new Set();
+    timelineProgressSeenIdsRef.current = new Set();
   }
 
   function finishRun(nextState: Exclude<RunState, "idle" | "running">, stage: ProgressEvent["type"], message: string) {
@@ -574,10 +647,14 @@ export default function Home() {
     setLastMessage(message);
     setLastEventAt(now);
     setClockNow(now);
-    if (runStartedAt) {
+    if (runModeRef.current === "generate") {
+      setRunProgressPercent((current) => (nextState === "complete" ? 100 : current));
+      if (nextState === "complete") setRunMilestoneLabel("Complete");
+    }
+    if (runStartedAtRef.current) {
       setLastRunSummary({
-        durationMs: Math.max(0, now - runStartedAt),
-        usage: tokenTotals,
+        durationMs: Math.max(0, now - runStartedAtRef.current),
+        usage: tokenTotalsRef.current,
         endedAt: now
       });
     }
@@ -640,7 +717,10 @@ export default function Home() {
     setSampleHtml(data.sampleHtml);
     setLastSampleMarkdown(skillMarkdown);
     setSampleSyncStatus("synced");
-    if (openSampleTab) setActiveTab("sample");
+    if (openSampleTab) {
+      setActiveTab("edit");
+      setEditViewTab("sample");
+    }
   }
 
   function acceptPatch(finding: VerificationFinding) {
@@ -679,6 +759,13 @@ export default function Home() {
     providerKind === "openai"
       ? openaiModels.find((option) => option.id === model)?.approxCostPer1M ?? resolveApproxCostPer1M(model)
       : undefined;
+  const hasInvalidLlmConfig = useMemo(() => {
+    const missingModel = !model.trim();
+    if (providerKind === "openai") {
+      return missingModel || !apiKey.trim();
+    }
+    return missingModel || !baseUrl.trim();
+  }, [apiKey, baseUrl, model, providerKind]);
 
   useEffect(() => {
     if (!sampleHtml) {
@@ -737,7 +824,35 @@ export default function Home() {
 
       <div className="workspace">
         <aside className="rail">
-          <section className="stack">
+          <nav className="tabs workspace-tabs" role="tablist" aria-label="Workspace controls">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={railTab === "assets"}
+              id="rail-tab-assets"
+              className={`tab${railTab === "assets" ? " active" : ""}`}
+              onClick={() => setRailTab("assets")}
+            >
+              Assets &amp; Progress
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={railTab === "settings"}
+              id="rail-tab-settings"
+              className={`tab${railTab === "settings" ? " active" : ""}`}
+              onClick={() => setRailTab("settings")}
+            >
+              <span className="rail-tab-label">
+                Settings
+                {hasInvalidLlmConfig && <span className="notification-dot" aria-label="Settings incomplete" title="LLM settings are incomplete" />}
+              </span>
+            </button>
+          </nav>
+
+          {railTab === "settings" && (
+            <div className="panel-body stack">
+          <section className="stack" role="tabpanel" aria-labelledby="rail-tab-settings">
             <div className="section-title">Provider</div>
             <div className="field">
               <label htmlFor="provider">LLM provider</label>
@@ -859,6 +974,25 @@ export default function Home() {
           </section>
 
           <section className="stack">
+            <div className="section-title">Bundle</div>
+            <div className="field">
+              <label htmlFor="bundle-asset-mode">Bundle asset mode</label>
+              <select
+                id="bundle-asset-mode"
+                value={bundleAssetMode}
+                onChange={(event) => setBundleAssetMode(event.target.value as BundleAssetMode)}
+              >
+                <option value="reference">Reference assets</option>
+                <option value="download">Download embedded assets</option>
+              </select>
+            </div>
+          </section>
+            </div>
+          )}
+
+          {railTab === "assets" && (
+            <div className="panel-body stack">
+          <section className="stack" role="tabpanel" aria-labelledby="rail-tab-assets">
             <div className="section-title">Assets</div>
             <div
               className={`dropzone${dragging ? " dragging" : ""}`}
@@ -894,9 +1028,9 @@ export default function Home() {
                 Add URL
               </button>
             </form>
-            <div className="asset-list">
-              {assets.length ? (
-                assets.map((asset: DesignAsset) => (
+            {assets.length > 0 && (
+              <div className="asset-list">
+                {assets.map((asset: DesignAsset) => (
                   <div className="asset" key={asset.id}>
                     <div>
                       <strong>{asset.name}</strong>
@@ -915,20 +1049,11 @@ export default function Home() {
                       </button>
                     </div>
                   </div>
-                ))
-              ) : (
-                <div className="empty">No assets added yet.</div>
-              )}
-            </div>
-            <button className="primary" onClick={startGeneration} disabled={busy || runActive || !session || !assets.length}>
-              Generate Skill
-            </button>
-            <div className="disclosure hint">Step 3: Generate from your current provider settings and uploaded assets.</div>
-          </section>
-
-          <section className="stack">
+                ))}
+              </div>
+            )}
             <div className="field">
-              <label htmlFor="guidance">Optional extraction guidance</label>
+              <label className="label-regular" htmlFor="guidance">Optional extraction guidance</label>
               <textarea
                 id="guidance"
                 value={guidance}
@@ -936,6 +1061,9 @@ export default function Home() {
                 placeholder="Example: Focus on dashboard density, component behavior, and accessibility rules."
               />
             </div>
+            <button className="primary" onClick={startGeneration} disabled={busy || runActive || !session || !assets.length}>
+              Generate Skill
+            </button>
           </section>
 
           <section className="stack">
@@ -954,6 +1082,15 @@ export default function Home() {
                 {runActive && <span className="status-pulse" aria-hidden />}
               </div>
               <div className="run-stage">{labelForProgressType(currentStage)}{lastMessage ? ` - ${lastMessage}` : ""}</div>
+              {runMode === "generate" && (
+                <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={runProgressPercent}>
+                  <div className="progress-fill" style={{ width: `${runProgressPercent}%` }} />
+                  <div className="progress-meta">
+                    <span>{runMilestoneLabel}</span>
+                    <span>{Math.round(runProgressPercent)}%</span>
+                  </div>
+                </div>
+              )}
               <div className="run-meta">
                 {runStartedAt ? `Elapsed ${formatDuration(elapsedSeconds)}` : "Waiting to start"}
                 {lastEventAt ? ` · last update ${secondsSinceEvent}s ago` : ""}
@@ -984,7 +1121,7 @@ export default function Home() {
                   ))}
                 </div>
               ) : (
-                <div className="empty">Progress updates will stream here.</div>
+                <div className="run-status progress-empty-card">SKILL.md generation log</div>
               )}
             </div>
             <div className="stream-panel">
@@ -1010,15 +1147,14 @@ export default function Home() {
             </div>
             {notice && <div className="quality-note">{notice}</div>}
           </section>
+            </div>
+          )}
         </aside>
 
         <section className="main-panel">
-          <nav className="tabs" aria-label="Workspace tabs">
+          <nav className="tabs workspace-tabs" aria-label="Workspace tabs">
             <button className={`tab${activeTab === "edit" ? " active" : ""}`} onClick={() => setActiveTab("edit")}>
               Edit
-            </button>
-            <button className={`tab${activeTab === "sample" ? " active" : ""}`} onClick={() => setActiveTab("sample")}>
-              Sample
             </button>
             <button className={`tab${activeTab === "verify" ? " active" : ""}`} onClick={() => setActiveTab("verify")}>
               Verify
@@ -1027,21 +1163,74 @@ export default function Home() {
 
           {activeTab === "edit" && (
             <div className="panel-body stack">
+              <div className="edit-card">
+                <header>
+                  <div className="row tabs edit-tabs" role="tablist" aria-label="Edit panel views">
+                    <button
+                      type="button"
+                      className={`tab${editViewTab === "markdown" ? " active" : ""}`}
+                      role="tab"
+                      aria-selected={editViewTab === "markdown"}
+                      onClick={() => setEditViewTab("markdown")}
+                    >
+                      SKILL.md
+                    </button>
+                    <button
+                      type="button"
+                      className={`tab${editViewTab === "preview" ? " active" : ""}`}
+                      role="tab"
+                      aria-selected={editViewTab === "preview"}
+                      onClick={() => setEditViewTab("preview")}
+                    >
+                      Preview
+                    </button>
+                    <button
+                      type="button"
+                      className={`tab${editViewTab === "sample" ? " active" : ""}`}
+                      role="tab"
+                      aria-selected={editViewTab === "sample"}
+                      onClick={() => setEditViewTab("sample")}
+                    >
+                      Sample
+                    </button>
+                  </div>
+                </header>
+                {editViewTab === "markdown" ? (
+                  <textarea
+                    id="skill-editor"
+                    className="editor"
+                    value={skillMarkdown}
+                    onChange={(event) => setSkillMarkdown(event.target.value)}
+                    spellCheck={false}
+                  />
+                ) : editViewTab === "preview" ? (
+                  <article className="preview" dangerouslySetInnerHTML={{ __html: renderMarkdown(skillMarkdown) }} />
+                ) : (
+                  <div className="panel-body stack">
+                    <div className="meta">
+                      {sampleSyncStatus === "refreshing"
+                        ? "Refreshing sample preview from current SKILL.md..."
+                        : sampleSyncStatus === "stale"
+                          ? "Detected SKILL.md changes. Refresh will run automatically."
+                          : sampleSyncStatus === "error"
+                            ? "Sample refresh failed. Keep editing and it will retry automatically."
+                            : sampleSyncStatus === "synced"
+                              ? "Sample preview is synced with the latest SKILL.md."
+                              : "Generate a skill to create the first sample preview."}
+                    </div>
+                    {sampleHtml ? (
+                      <iframe className="sample-frame" sandbox="allow-same-origin" srcDoc={sampleHtml} title="Generated sample page" />
+                    ) : (
+                      <div className="empty">Generate a skill to preview an applied design sample.</div>
+                    )}
+                  </div>
+                )}
+              </div>
               <div className="row">
                 <button onClick={downloadCurrentSkill}>Download SKILL.md</button>
-                <div className="row" role="group" aria-label="Download bundle controls">
-                  <button onClick={() => void downloadBundle()} disabled={!session}>
-                    Download Bundle
-                  </button>
-                  <select
-                    aria-label="Bundle asset mode"
-                    value={bundleAssetMode}
-                    onChange={(event) => setBundleAssetMode(event.target.value as BundleAssetMode)}
-                  >
-                    <option value="reference">Reference assets</option>
-                    <option value="download">Download embedded assets</option>
-                  </select>
-                </div>
+                <button onClick={() => void downloadBundle()} disabled={!session}>
+                  Download Bundle
+                </button>
                 <span className="meta" aria-live="polite">
                   {saveState === "saving"
                     ? "Saving..."
@@ -1052,58 +1241,6 @@ export default function Home() {
                         : "Autosave idle"}
                 </span>
               </div>
-              <div className="split-pane">
-                <section>
-                  <header>
-                    <strong>SKILL.md</strong>
-                    <span className="meta">{skillMarkdown.length.toLocaleString()} chars</span>
-                  </header>
-                  <textarea
-                    id="skill-editor"
-                    className="editor"
-                    value={skillMarkdown}
-                    onChange={(event) => setSkillMarkdown(event.target.value)}
-                    spellCheck={false}
-                  />
-                </section>
-                <section>
-                  <header>
-                    <strong>Preview</strong>
-                  </header>
-                  <article className="preview" dangerouslySetInnerHTML={{ __html: renderMarkdown(skillMarkdown) }} />
-                </section>
-              </div>
-              {!!session?.skillDraft?.qualityNotes.length && (
-                <div className="stack">
-                  <div className="section-title">Quality notes</div>
-                  {session.skillDraft.qualityNotes.map((note) => (
-                    <div className="quality-note" key={note}>
-                      {note}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {activeTab === "sample" && (
-            <div className="panel-body stack">
-              <div className="meta">
-                {sampleSyncStatus === "refreshing"
-                  ? "Refreshing sample preview from current SKILL.md..."
-                  : sampleSyncStatus === "stale"
-                    ? "Detected SKILL.md changes. Refresh will run automatically."
-                    : sampleSyncStatus === "error"
-                      ? "Sample refresh failed. Keep editing and it will retry automatically."
-                      : sampleSyncStatus === "synced"
-                        ? "Sample preview is synced with the latest SKILL.md."
-                        : "Generate a skill to create the first sample preview."}
-              </div>
-              {sampleHtml ? (
-                <iframe className="sample-frame" sandbox="allow-same-origin" srcDoc={sampleHtml} title="Generated sample page" />
-              ) : (
-                <div className="empty">Generate a skill to preview an applied design sample.</div>
-              )}
             </div>
           )}
 
@@ -1191,6 +1328,34 @@ function labelForProgressType(type: ProgressEvent["type"] | null) {
   if (type === "complete") return "Completed";
   if (type === "warning") return "Warning";
   return "Error";
+}
+
+function getGenerationMilestone(event: ProgressEvent): GenerationMilestone | null {
+  if (event.type === "complete") return { percent: 100, label: "Complete" };
+  if (event.type === "queued") return { percent: 1, label: "Queued" };
+  if (event.type === "ingesting_asset") return { percent: 1, label: "Preparing assets" };
+  if (event.stepId) return GENERATION_BASELINE_MILESTONES[event.stepId] || null;
+  return null;
+}
+
+function getSectionStepProgress(event: ProgressEvent, seenIds: Set<string>): { label: string } | null {
+  if (seenIds.has(event.id)) return null;
+  if (SECTION_STEP_IDS.includes(event.stepId as ProgressStepId) && event.streamKind === "step_complete") {
+    seenIds.add(event.id);
+    const stepLabel = labelForStep(event.stepId || null);
+    return { label: stepLabel };
+  }
+  if (event.stepId === "assemble_skill" && !event.streamKind) {
+    seenIds.add(event.id);
+    return { label: "Assemble skill" };
+  }
+  return null;
+}
+
+function getSectionProgressPercent(completedUnits: number) {
+  const boundedUnits = Math.max(0, Math.min(completedUnits, TOTAL_SECTION_PROGRESS_UNITS));
+  const span = SECTION_PROGRESS_END_PERCENT - SECTION_PROGRESS_START_PERCENT;
+  return SECTION_PROGRESS_START_PERCENT + (boundedUnits / TOTAL_SECTION_PROGRESS_UNITS) * span;
 }
 
 function formatDuration(totalSeconds: number) {
