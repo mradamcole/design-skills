@@ -125,7 +125,7 @@ export function formatPinnedBrandAssetsBlock(assets: DesignAsset[]): string {
   if (!pinned.length) return "";
   const lines = pinned.map(
     (c) =>
-      `- ${displayHumanName(c.fileName, c.humanName)} (file: ${c.fileName}, source: ${c.sourceUrl})`
+      `- Image: \`${displayHumanName(c.fileName, c.humanName)}\` ${c.fileName} (source: ${c.sourceUrl})`
   );
   return `## Pinned Brand Assets\n${lines.join("\n")}\n\n`;
 }
@@ -134,11 +134,11 @@ export function formatRequiredBrandPinsBlock(brandPins: ImageCard[]): string {
   if (!brandPins.length) return "";
   const lines = brandPins.map(
     (c) =>
-      `- Always use \`${displayHumanName(c.fileName, c.humanName)}\` (file \`${c.fileName}\`) — source: ${c.sourceUrl}`
+      `- Image: \`${displayHumanName(c.fileName, c.humanName)}\` ${c.fileName}`
   );
   return `
 
 Required brand pins (non-optional):
-These MUST appear in this section, one bullet each, using the form:
+These MUST appear in this section, one bullet each, exactly as shown (one bullet per pin, do not shorten):
 ${lines.join("\n")}`;
 }

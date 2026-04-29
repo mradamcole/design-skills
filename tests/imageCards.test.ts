@@ -4,7 +4,10 @@ import {
   collectPinnedBrandCards,
   decodedByteLength,
   formatBytes,
-  proposeHumanName
+  formatPinnedBrandAssetsBlock,
+  formatRequiredBrandPinsBlock,
+  proposeHumanName,
+  type ImageCard
 } from "@/lib/imageCards";
 import type { DesignAsset } from "@/lib/types";
 
@@ -142,5 +145,52 @@ describe("collectImageCards", () => {
     const pinned = collectPinnedBrandCards([a, b]);
     expect(pinned).toHaveLength(1);
     expect(pinned[0]!.fileName).toBe("a.png");
+  });
+});
+
+const minimalCard = (overrides: Partial<ImageCard>): ImageCard => ({
+  id: "id1",
+  ownerAssetId: "o1",
+  kind: "upload",
+  fileName: "SDH_2064x64.png",
+  sourceUrl: "https://example.com/x.png",
+  displaySrc: "data:image/png;base64,xx",
+  fileSizeBytes: 1,
+  ...overrides
+});
+
+describe("formatRequiredBrandPinsBlock", () => {
+  it("emits Image prefix, backticked display name, and plain filename", () => {
+    const block = formatRequiredBrandPinsBlock([
+      minimalCard({ humanName: "Sdh 2064x64" })
+    ]);
+    expect(block).toContain("exactly as shown");
+    expect(block).toContain("- Image: `Sdh 2064x64` SDH_2064x64.png");
+    expect(block).not.toContain("Always use");
+  });
+
+  it("returns empty string when no pins", () => {
+    expect(formatRequiredBrandPinsBlock([])).toBe("");
+  });
+});
+
+describe("formatPinnedBrandAssetsBlock", () => {
+  it("lists pinned assets with Image line and source", () => {
+    const assets: DesignAsset[] = [
+      {
+        id: "a1",
+        type: "image",
+        name: "logo.png",
+        source: "upload",
+        mimeType: "image/png",
+        dataUrl: "data:image/png;base64,xx",
+        status: "ready",
+        pinToBrand: true,
+        humanName: "Primary Logo"
+      }
+    ];
+    const block = formatPinnedBrandAssetsBlock(assets);
+    expect(block).toContain("## Pinned Brand Assets");
+    expect(block).toContain("- Image: `Primary Logo` logo.png (source: upload)");
   });
 });
