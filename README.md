@@ -1,6 +1,14 @@
 # Design SKILL.md Generator
 
-A local [Next.js](https://nextjs.org/) app that helps you draft and verify **design-system–oriented** Cursor agent skills (`SKILL.md`). Upload design references (images and text), run a guided generation workflow against **OpenAI** or **local Ollama**, then review markdown, previews, and sample outputs.
+A local [Next.js](https://nextjs.org/) app that helps you draft and verify **design-system–oriented** agent skills (`SKILL.md`). Add example URLS, upload design references (images and text), run a guided generation workflow against **OpenAI** or **local Ollama**, then review markdown, previews, and sample outputs.
+
+## Screenshots
+
+![Design SKILL.md generator — workflow view 1](./imgs/Design-SKILL-md1.png)
+
+![Design SKILL.md generator — workflow view 2](./imgs/Design-SKILL-md2.png)
+
+![Design SKILL.md generator — workflow view 3](./imgs/Design-SKILL-md3.png)
 
 ## Features
 
