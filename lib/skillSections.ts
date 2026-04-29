@@ -29,6 +29,8 @@ export interface SkillSectionDefinition {
 
 export const SKILL_TITLE = "# Design System Skill";
 
+export const DEFAULT_MAX_CSS_COLORS = 16;
+
 export const SKILL_SECTION_DEFINITIONS: SkillSectionDefinition[] = [
   {
     id: "when_to_use",
@@ -82,9 +84,10 @@ export const SKILL_SECTION_DEFINITIONS: SkillSectionDefinition[] = [
     id: "voice",
     heading: "## Voice",
     intent: "Describe copy style and capitalization requirements supported by evidence.",
-    evidenceCategories: ["visual language"],
+    evidenceCategories: ["voice", "visual language"],
     target: { minBullets: 1, maxBullets: 4, maxCharsPerBullet: 140 },
-    emptyEvidencePolicy: "Say copy tone is not evidenced and avoid inventing branding voice."
+    emptyEvidencePolicy:
+      "If on-page copy is thin or ambiguous, state only what is directly evidenced; avoid inventing a brand voice or tonal adjectives without textual support."
   },
   {
     id: "accessibility_and_responsiveness",
@@ -111,6 +114,31 @@ export const SKILL_SECTION_DEFINITIONS: SkillSectionDefinition[] = [
     emptyEvidencePolicy: "Provide minimal placeholder examples and avoid introducing unsupported branding facts."
   }
 ];
+
+/** Clamp URL/CSS color budget and generation-aligned limits to 1–64; invalid values fall back to DEFAULT_MAX_CSS_COLORS. */
+export function clampMaxCssColors(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_MAX_CSS_COLORS;
+  const rounded = Math.round(n);
+  if (rounded < 1 || rounded > 64) return DEFAULT_MAX_CSS_COLORS;
+  return rounded;
+}
+
+/** Section defs for a run: ## Colors maxBullets is at least the color literal budget (and baseline 8). */
+export function skillSectionDefinitionsForColorBudget(maxCssColors: number): SkillSectionDefinition[] {
+  const clamped = clampMaxCssColors(maxCssColors);
+  return SKILL_SECTION_DEFINITIONS.map((def) =>
+    def.id !== "colors"
+      ? def
+      : {
+          ...def,
+          target: {
+            ...def.target,
+            maxBullets: Math.max(def.target.maxBullets ?? 8, clamped)
+          }
+        }
+  );
+}
 
 export const REQUIRED_SKILL_SECTIONS = SKILL_SECTION_DEFINITIONS.map((section) => section.heading);
 export const STATIC_BASELINE_SECTION_IDS: SkillSectionId[] = ["when_to_use", "workflow", "verification_checklist"];

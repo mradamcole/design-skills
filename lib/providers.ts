@@ -374,6 +374,10 @@ function nanosToMs(value?: number) {
   return Math.round(value / 1_000_000);
 }
 
+/** Per-asset cap for text injected into LLM prompts (stored URL bundles are up to 80k). */
+const ASSET_PROMPT_CONTENT_LIMIT_URL = 72_000;
+const ASSET_PROMPT_CONTENT_LIMIT_DEFAULT = 48_000;
+
 export function buildAssetPrompt(prompt: string, assets: DesignAsset[]) {
   const pinnedBlock = formatPinnedBrandAssetsBlock(assets);
   const assetBlocks = assets
@@ -385,7 +389,7 @@ export function buildAssetPrompt(prompt: string, assets: DesignAsset[]) {
           : asset.type === "image"
             ? "visual reference supplied separately when the provider supports vision"
             : "uploaded reference content";
-      const contentLimit = asset.type === "url" ? 18_000 : 12_000;
+      const contentLimit = asset.type === "url" ? ASSET_PROMPT_CONTENT_LIMIT_URL : ASSET_PROMPT_CONTENT_LIMIT_DEFAULT;
       return `Asset ${index + 1}: ${asset.name}
 Type: ${asset.type}
 Source: ${asset.source}

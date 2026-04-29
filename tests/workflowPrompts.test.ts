@@ -5,7 +5,8 @@ describe("workflow prompts", () => {
   it("asks extraction to preserve concrete design evidence", () => {
     const prompt = buildExtractionPrompt("prioritize website identity");
 
-    expect(prompt).toContain("category=<one of color|typography|layout|components|accessibility|visual language>");
+    expect(prompt).toContain("category=<one of color|typography|layout|components|accessibility|visual language|voice>");
+    expect(prompt).toContain("Readable Page Text");
     expect(prompt).toContain("confidence=<high|medium|low>");
     expect(prompt).toContain("font families");
     expect(prompt).toContain("CSS variables");

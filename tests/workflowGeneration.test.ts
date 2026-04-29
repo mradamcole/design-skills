@@ -24,7 +24,8 @@ function createMockProvider(options?: { failFirstWhenToUseDraft?: boolean }): Ll
         "- category=typography; confidence=high; source=Reference A; observation=Headings use Inter 700.",
         "- category=layout; confidence=medium; source=Reference A; observation=Cards use 24px spacing.",
         "- category=components; confidence=medium; source=Reference A; observation=Buttons are rounded with clear hover states.",
-        "- category=accessibility; confidence=high; source=Reference A; observation=Focus states are visible and contrast is strong."
+        "- category=accessibility; confidence=high; source=Reference A; observation=Focus states are visible and contrast is strong.",
+        "- category=voice; confidence=high; source=Reference A; observation=Our team uses friendly second-person copy with short Learn more CTAs."
       ].join("\n");
     },
     async generateTextStream(prompt: string, handlers) {
@@ -57,7 +58,7 @@ function createMockProvider(options?: { failFirstWhenToUseDraft?: boolean }): Ll
         return "## Typography\n- Use Inter for headings at strong weight.\n- Keep readable body hierarchy with consistent scale.";
       }
       if (prompt.includes("Required heading: ## Voice")) {
-        return "## Voice\n- Copy tone is not strongly evidenced; keep neutral and concise.";
+        return "## Voice\n- Prefer second-person you/your in marketing copy.\n- Use short CTA verbs such as Learn more.\n- Keep an approachable, team-forward we voice in hero copy.";
       }
       if (prompt.includes("Required heading: ## Accessibility And Responsiveness")) {
         return "## Accessibility And Responsiveness\n- Keep visible focus states.\n- Preserve contrast in interactive elements.\n- Maintain readable spacing on narrow screens.";
@@ -74,6 +75,9 @@ function createMockProvider(options?: { failFirstWhenToUseDraft?: boolean }): Ll
       if (prompt.startsWith("Revise this section")) {
         const headingMatch = prompt.match(/Return only markdown for (## [^\n]+)/);
         const heading = headingMatch?.[1] || "## Unknown";
+        if (heading === "## Voice") {
+          return `${heading}\n- Prefer second-person you/your in marketing copy.\n- Use short CTA verbs such as Learn more.\n- Keep an approachable, team-forward we voice in hero copy.`;
+        }
         return `${heading}\n- Evidence-backed guidance retained.\n- Unsupported claims removed.`;
       }
       if (prompt.startsWith("Finalize this SKILL.md")) {
@@ -202,5 +206,32 @@ describe("workflow generation", () => {
     expect(draftedHeadings).not.toContain("## Workflow");
     expect(draftedHeadings).not.toContain("## Verification Checklist");
     expect(draftedHeadings).toContain("## Typography");
+  });
+
+  it("merges compiled Voice facts with raw observations when compiler is enabled and readable text exists", async () => {
+    const session = createSession("generate");
+    const readable = `${"Wordy marketing narrative. ".repeat(12)}Get started today.`;
+    addAsset(session.id, {
+      id: "asset-compiler-voice",
+      type: "url",
+      name: "Reference A",
+      source: "https://example.com/voice",
+      mimeType: "text/plain",
+      content: `## Readable Page Text\n${readable}\n\n## Typography Signals\n- font-size: 16px`,
+      status: "ready"
+    });
+
+    await runGeneration(session.id, providerConfig, undefined, {
+      provider: createMockProvider(),
+      sectionFirstEnabled: true,
+      retriesPerSection: 1,
+      sectionEvidenceCompilerEnabled: true
+    });
+
+    const updated = getSession(session.id);
+    expect(updated?.status).toBe("complete");
+    const voiceSection = updated?.skillDraft?.markdown.match(/## Voice\n([\s\S]*?)(?=\n## |\n*$)/)?.[1] || "";
+    expect(voiceSection).not.toMatch(/not strongly evidenced|not evidenced/i);
+    expect(voiceSection.length).toBeGreaterThan(40);
   });
 });

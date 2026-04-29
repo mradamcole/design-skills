@@ -3,7 +3,12 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { collectImageCards, displayHumanName, formatBytes, proposeHumanName, type ImageCard } from "@/lib/imageCards";
 import { resolveApproxCostPer1M } from "@/lib/openaiModels";
-import { SKILL_SECTION_DEFINITIONS, STATIC_BASELINE_SECTION_IDS } from "@/lib/skillSections";
+import {
+  clampMaxCssColors,
+  DEFAULT_MAX_CSS_COLORS,
+  SKILL_SECTION_DEFINITIONS,
+  STATIC_BASELINE_SECTION_IDS
+} from "@/lib/skillSections";
 import type {
   DesignAsset,
   GenerationSession,
@@ -88,6 +93,7 @@ export default function Home() {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState("");
   const [guidance, setGuidance] = useState("");
+  const [maxCssColors, setMaxCssColors] = useState(DEFAULT_MAX_CSS_COLORS);
   const [url, setUrl] = useState("");
   const [existingSkillLoadMode, setExistingSkillLoadMode] = useState<"file" | "url">("file");
   const [existingSkillUrl, setExistingSkillUrl] = useState("");
@@ -162,7 +168,8 @@ export default function Home() {
           apiKey,
           baseUrl,
           guidance,
-          existingSkill
+          existingSkill,
+          maxCssColors
         } satisfies Partial<UserSettingsMemory>)
       });
     }, 300);
@@ -170,7 +177,7 @@ export default function Home() {
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [apiKey, baseUrl, existingSkill, guidance, memoryReady, model, providerKind]);
+  }, [apiKey, baseUrl, existingSkill, guidance, maxCssColors, memoryReady, model, providerKind]);
 
   useEffect(() => {
     if (providerKind !== "openai") {
@@ -290,12 +297,14 @@ export default function Home() {
   }, [baseUrl, providerKind]);
 
   useEffect(() => {
-    if (runState !== "running") return;
+    const needsTickingClock =
+      runState === "running" || (busy && assetWork !== null);
+    if (!needsTickingClock) return;
     const intervalId = window.setInterval(() => setClockNow(Date.now()), 1000);
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [runState]);
+  }, [runState, busy, assetWork]);
 
   useEffect(() => {
     runModeRef.current = runMode;
@@ -383,6 +392,7 @@ export default function Home() {
       setBaseUrl(memory.baseUrl || "http://localhost:11434");
       setGuidance(memory.guidance || "");
       setExistingSkill(memory.existingSkill || defaultSkill);
+      setMaxCssColors(clampMaxCssColors(memory.maxCssColors));
     }
     setMemoryReady(true);
   }
@@ -438,7 +448,7 @@ export default function Home() {
     const response = await fetch("/api/assets", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: session.id, url: url.trim() })
+      body: JSON.stringify({ sessionId: session.id, url: url.trim(), maxCssColors })
     });
     setBusy(false);
     setAssetWork(null);
@@ -499,7 +509,7 @@ export default function Home() {
     const response = await fetch("/api/generate", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: session.id, providerConfig, guidance })
+      body: JSON.stringify({ sessionId: session.id, providerConfig, guidance, maxCssColors })
     });
     setBusy(false);
     if (!response.ok) {
@@ -1086,6 +1096,25 @@ export default function Home() {
                 Cloud generation sends uploaded references or extracted text to OpenAI for this session only.
               </div>
             )}
+          </section>
+
+          <section className="stack">
+            <div className="section-title">Generation</div>
+            <div className="field">
+              <label htmlFor="max-css-colors">Max CSS color literals (URL assets)</label>
+              <input
+                id="max-css-colors"
+                type="number"
+                min={1}
+                max={64}
+                value={maxCssColors}
+                onChange={(event) => setMaxCssColors(clampMaxCssColors(Number(event.target.value)))}
+              />
+              <div className="disclosure hint">
+                How many distinct hex/rgb/hsl values to keep from scraped stylesheets (by frequency). Re-add URL assets after
+                changing this so evidence refreshes.
+              </div>
+            </div>
           </section>
 
           <section className="stack">

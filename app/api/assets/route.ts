@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { fileToAsset, urlToAsset } from "@/lib/assets";
-import { addAsset, getSession, removeAsset, updateImageMetadata } from "@/lib/store";
+import { clampMaxCssColors } from "@/lib/skillSections";
+import { addAsset, getSession, getSettingsMemory, removeAsset, updateImageMetadata } from "@/lib/store";
 
 export async function POST(request: Request) {
   const contentType = request.headers.get("content-type") || "";
@@ -18,7 +19,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ assets });
   }
 
-  const body = (await request.json()) as { sessionId?: string; url?: string };
+  const body = (await request.json()) as { sessionId?: string; url?: string; maxCssColors?: number };
   if (!body.sessionId || !getSession(body.sessionId)) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
   }
@@ -26,7 +27,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "URL is required" }, { status: 400 });
   }
   try {
-    const asset = addAsset(body.sessionId, await urlToAsset(body.url));
+    const maxCssColors = clampMaxCssColors(body.maxCssColors ?? getSettingsMemory().maxCssColors);
+    const asset = addAsset(body.sessionId, await urlToAsset(body.url, { maxCssColors }));
     return NextResponse.json({ assets: [asset] });
   } catch (error) {
     return NextResponse.json(

@@ -81,6 +81,14 @@ describe("asset classification", () => {
     expect(signals.spacing).toEqual(expect.arrayContaining(["24px", "12px"]));
   });
 
+  it("limits distinct CSS color literals via maxColors", () => {
+    const css = Array.from({ length: 20 }, (_, i) => `.c${i}{color:#${String(i + 1).padStart(6, "0")}}`).join("\n");
+    const many = extractCssSignals(css, { maxColors: 20 });
+    expect(many.colors.length).toBe(20);
+    const few = extractCssSignals(css, { maxColors: 4 });
+    expect(few.colors.length).toBe(4);
+  });
+
   it("builds URL assets with readable text, icons, stylesheet CSS, and typography evidence", async () => {
     const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
       const value = input.toString();

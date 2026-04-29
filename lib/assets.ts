@@ -1,3 +1,4 @@
+import { clampMaxCssColors } from "./skillSections";
 import type { AssetType, DesignAsset, EmbeddedAsset, EmbeddedAssetKind } from "./types";
 
 const TEXT_MIME_PREFIXES = ["text/"];
@@ -77,7 +78,7 @@ export async function fileToAsset(file: File): Promise<DesignAsset> {
   };
 }
 
-export async function urlToAsset(rawUrl: string): Promise<DesignAsset> {
+export async function urlToAsset(rawUrl: string, options?: { maxCssColors?: number }): Promise<DesignAsset> {
   const url = new URL(rawUrl);
   const response = await fetch(url, {
     headers: {
@@ -88,7 +89,9 @@ export async function urlToAsset(rawUrl: string): Promise<DesignAsset> {
   const metadata = extractPageMetadata(text, url);
   const inlineCss = extractInlineCss(text);
   const linkedCss = await fetchLinkedStylesheets(text, url);
-  const cssSignals = extractCssSignals([inlineCss, linkedCss.css].filter(Boolean).join("\n\n"));
+  const cssSignals = extractCssSignals([inlineCss, linkedCss.css].filter(Boolean).join("\n\n"), {
+    maxColors: options?.maxCssColors
+  });
   const embeddedAssets = await discoverEmbeddedAssets(text, url, metadata, [inlineCss, linkedCss.css].filter(Boolean).join("\n\n"));
   const readableText = extractReadableText(text);
   const content = buildUrlAssetContent({
@@ -189,12 +192,13 @@ export function extractPageMetadata(html: string, baseUrl: URL): PageMetadata {
   };
 }
 
-export function extractCssSignals(css: string): CssSignals {
+export function extractCssSignals(css: string, options?: { maxColors?: number }): CssSignals {
   const cleaned = css.replace(/\/\*[\s\S]*?\*\//g, " ").slice(0, MAX_CSS_CHARS);
   const customProperties = Array.from(cleaned.matchAll(/(--[\w-]+)\s*:\s*([^;{}]+)/g))
     .map((match) => ({ name: match[1], value: cleanCssValue(match[2]) }))
     .filter((item) => item.value)
     .slice(0, 40);
+  const colorLimit = clampMaxCssColors(options?.maxColors);
 
   return {
     fontImports: unique(Array.from(cleaned.matchAll(/@import\s+(?:url\()?["']?([^"')\s;]+)["']?\)?[^;]*;/gi)).map((match) => match[1])).slice(0, 12),
@@ -203,7 +207,7 @@ export function extractCssSignals(css: string): CssSignals {
     fontWeights: topDeclarationValues(cleaned, "font-weight", 12),
     lineHeights: topDeclarationValues(cleaned, "line-height", 12),
     letterSpacings: topDeclarationValues(cleaned, "letter-spacing", 12),
-    colors: topValues(cleaned.match(/#[0-9a-f]{3,8}\b|rgba?\([^)]+\)|hsla?\([^)]+\)/gi) || [], 24),
+    colors: topValues(cleaned.match(/#[0-9a-f]{3,8}\b|rgba?\([^)]+\)|hsla?\([^)]+\)/gi) || [], colorLimit),
     customProperties,
     radii: topDeclarationValues(cleaned, "border-radius", 16),
     shadows: topDeclarationValues(cleaned, "box-shadow", 12),

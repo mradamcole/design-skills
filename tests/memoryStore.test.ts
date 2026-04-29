@@ -22,6 +22,7 @@ describe("settings memory store", () => {
     expect(afterClear.providerKind).toBe("openai");
     expect(afterClear.model).toBe("gpt-4o-mini");
     expect(afterClear.guidance).toBe("");
+    expect(afterClear.maxCssColors).toBe(16);
     expect(afterClear.assets).toEqual([]);
   });
 

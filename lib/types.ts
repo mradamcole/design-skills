@@ -53,6 +53,8 @@ export interface UserSettingsMemory {
   baseUrl: string;
   guidance: string;
   existingSkill: string;
+  /** Cap on distinct CSS color literals for URL assets; coordinates Colors section budget during generation. */
+  maxCssColors: number;
   assets: DesignAsset[];
 }
 

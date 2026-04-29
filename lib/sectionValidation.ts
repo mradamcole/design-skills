@@ -33,7 +33,14 @@ export function validateSectionClaims(section: SkillSectionDefinition, draftSect
     if (tooLong) issues.push({ severity: "error", message: `${section.heading}: bullet exceeds ${section.target.maxCharsPerBullet} chars.` });
   }
 
-  if (!packet.selectedFacts.length && !body.toLowerCase().includes(section.emptyEvidencePolicy.toLowerCase().slice(0, 24))) {
+  const sparseEvidenceOk =
+    packet.selectedFacts.length > 0 ||
+    body.toLowerCase().includes(section.emptyEvidencePolicy.toLowerCase().slice(0, 24)) ||
+    (section.id === "voice" &&
+      packet.voiceReadableNarrativeAvailable &&
+      (!section.target.minBullets || bullets.length >= section.target.minBullets));
+
+  if (!sparseEvidenceOk) {
     issues.push({ severity: "error", message: `${section.heading}: sparse evidence fallback was not used.` });
   }
 

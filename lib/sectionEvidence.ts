@@ -1,7 +1,14 @@
 import { SKILL_SECTION_DEFINITIONS, type SkillSectionDefinition, type SkillSectionId } from "./skillSections";
 import type { DesignAsset, SourceObservation } from "./types";
 
-export type ObservationCategory = "color" | "typography" | "layout" | "components" | "accessibility" | "visual language";
+export type ObservationCategory =
+  | "color"
+  | "typography"
+  | "layout"
+  | "components"
+  | "accessibility"
+  | "visual language"
+  | "voice";
 export type FactConfidence = "low" | "medium" | "high";
 
 export type FactKind =
@@ -75,6 +82,8 @@ export interface CompiledSectionEvidence {
   selectedFacts: CompiledEvidenceFact[];
   conflicts: EvidenceConflict[];
   unknowns: string[];
+  /** True when URL assets include substantial `## Readable Page Text` (Voice + validation). */
+  voiceReadableNarrativeAvailable?: boolean;
 }
 
 const CONFIDENCE_WEIGHT: Record<FactConfidence, number> = {
@@ -99,7 +108,11 @@ const FACT_KIND_PRIORITY: Partial<Record<FactKind, number>> = {
   "css-token": 12,
   "color-value": 11,
   spacing: 9,
-  radius: 8
+  radius: 8,
+  tone: 9,
+  "copy-pattern": 9,
+  capitalization: 9,
+  "label-style": 9
 };
 
 const SECTION_FACT_LIMITS: Partial<Record<SkillSectionId, number>> = {
@@ -114,6 +127,7 @@ const SECTION_FACT_LIMITS: Partial<Record<SkillSectionId, number>> = {
 
 export function normalizeObservationCategory(category: string): ObservationCategory {
   const value = category.trim().toLowerCase();
+  if (/\bvoice\b/.test(value) || /\bcopy\b/.test(value) || /\bmicrocopy\b/.test(value) || /\bcopywriting\b/.test(value)) return "voice";
   if (value.includes("color")) return "color";
   if (value.includes("type") || value.includes("font")) return "typography";
   if (value.includes("layout") || value.includes("grid")) return "layout";
@@ -122,20 +136,48 @@ export function normalizeObservationCategory(category: string): ObservationCateg
   return "visual language";
 }
 
-export function compileSectionEvidence(observations: SourceObservation[], assets: DesignAsset[]): CompiledSectionEvidence[] {
+/** Exported for section evidence packets and hybrid Voice routing. */
+export function urlAssetsHaveSubstantialReadableText(assets: DesignAsset[], minChars = 120): boolean {
+  const marker = "## Readable Page Text";
+  for (const asset of assets) {
+    if (asset.type !== "url" || !asset.content) continue;
+    const idx = asset.content.indexOf(marker);
+    if (idx === -1) continue;
+    const after = asset.content.slice(idx + marker.length);
+    const segment = (after.split(/\n##\s+/)[0] ?? "").replace(/^\s+/, "").trim();
+    if (!segment || segment.toLowerCase() === "no readable page text extracted.") continue;
+    if (segment.length >= minChars) return true;
+  }
+  return false;
+}
+
+export type CompileSectionEvidenceOptions = {
+  sectionDefinitions?: SkillSectionDefinition[];
+  /** When set, caps selected facts for ## Colors (defaults to static SECTION_FACT_LIMITS.colors). */
+  colorsFactLimit?: number;
+};
+
+export function compileSectionEvidence(
+  observations: SourceObservation[],
+  assets: DesignAsset[],
+  options?: CompileSectionEvidenceOptions
+): CompiledSectionEvidence[] {
+  const defs = options?.sectionDefinitions ?? SKILL_SECTION_DEFINITIONS;
   const merged = observations.concat(extractAssetSignalObservations(assets));
-  return SKILL_SECTION_DEFINITIONS.map((section) => {
+  return defs.map((section) => {
     const candidates = merged.filter((observation) => section.evidenceCategories.includes(normalizeObservationCategory(observation.category)));
     const facts = compileFactsForSection(section.id, candidates);
     const conflicts = detectConflicts(facts);
-    const unknowns = buildUnknowns(section, facts);
-    const selectedFacts = selectFactsForSection(section.id, facts);
+    const voiceReadableNarrativeAvailable = section.id === "voice" ? urlAssetsHaveSubstantialReadableText(assets) : false;
+    const unknowns = buildUnknowns(section, facts, section.id === "voice" && voiceReadableNarrativeAvailable);
+    const selectedFacts = selectFactsForSection(section.id, facts, options?.colorsFactLimit);
     return {
       section,
       facts,
       selectedFacts,
       conflicts,
-      unknowns
+      unknowns,
+      voiceReadableNarrativeAvailable: section.id === "voice" ? voiceReadableNarrativeAvailable : undefined
     };
   });
 }
@@ -209,18 +251,57 @@ function compileFactsForSection(sectionId: SkillSectionId, observations: SourceO
   }));
 }
 
-function parseObservation(value: string, category: ObservationCategory, sectionId: SkillSectionId) {
-  const normalized = normalizeValue(value);
-  const lower = normalized.toLowerCase();
-  const results: Array<{ kind: FactKind; value: string; normalizedValue: string }> = [];
+function looksLikeCssOrTokenLine(value: string): boolean {
+  const v = value.trim();
+  if (/^import:\s/i.test(v)) return true;
+  if (
+    /\b(font-family|font-size|font-weight|line-height|letter-spacing|color|margin|padding|gap|spacing|border-radius|box-shadow)\s*:/i.test(v)
+  )
+    return true;
+  if (/--[\w-]+\s*:/.test(v)) return true;
+  return false;
+}
 
-  const cssTokenMatches = normalized.match(/--[\w-]+/g) || [];
-  for (const token of cssTokenMatches) {
-    results.push({ kind: "css-token", value: token, normalizedValue: token.toLowerCase() });
+function parseVoiceObservationHeuristics(value: string, lower: string, normalized: string) {
+  const results: Array<{ kind: FactKind; value: string; normalizedValue: string }> = [];
+  if (lower.includes("sentence case") || lower.includes("title case")) {
+    results.push({ kind: "capitalization", value: normalized, normalizedValue: normalized.toLowerCase() });
   }
-  const colorMatches = normalized.match(/#[0-9a-f]{3,8}\b|rgba?\([^)]+\)|hsla?\([^)]+\)/gi) || [];
-  for (const color of colorMatches) {
-    results.push({ kind: "color-value", value: color, normalizedValue: normalizeColor(color) });
+  if (lower.includes("tone") || lower.includes("voice") || lower.includes("microcopy")) {
+    results.push({ kind: "tone", value: normalized, normalizedValue: normalized.toLowerCase() });
+  }
+  if (/\b(we|our|you|your|you're)\b/i.test(lower)) {
+    results.push({ kind: "copy-pattern", value: normalized, normalizedValue: "pronoun-address" });
+  }
+  if (
+    /\b(get started|learn more|sign up|sign in|contact us|try for free|subscribe|book a demo|request demo|start free)\b/i.test(lower)
+  ) {
+    results.push({ kind: "label-style", value: normalized, normalizedValue: "cta-verb-pattern" });
+  }
+  if (/[A-Z][a-z]+(?:\s+[A-Z][a-z]+){2,}/.test(value) && /[a-z]/.test(value)) {
+    results.push({ kind: "capitalization", value: normalized, normalizedValue: "title-case-phrases" });
+  }
+  if (/\?/.test(value)) {
+    results.push({ kind: "copy-pattern", value: normalized, normalizedValue: "question-led" });
+  }
+  return results;
+}
+
+function appendDesignTokenFacts(
+  normalized: string,
+  lower: string,
+  results: Array<{ kind: FactKind; value: string; normalizedValue: string }>,
+  options?: { omitCssTokensAndHex?: boolean }
+) {
+  if (!options?.omitCssTokensAndHex) {
+    const cssTokenMatches = normalized.match(/--[\w-]+/g) || [];
+    for (const token of cssTokenMatches) {
+      results.push({ kind: "css-token", value: token, normalizedValue: token.toLowerCase() });
+    }
+    const colorMatches = normalized.match(/#[0-9a-f]{3,8}\b|rgba?\([^)]+\)|hsla?\([^)]+\)/gi) || [];
+    for (const color of colorMatches) {
+      results.push({ kind: "color-value", value: color, normalizedValue: normalizeColor(color) });
+    }
   }
   const fontFamily = captureValue(normalized, /font-family:\s*([^;]+)/i);
   if (fontFamily) results.push({ kind: "font-family", value: fontFamily, normalizedValue: fontFamily.toLowerCase() });
@@ -242,17 +323,57 @@ function parseObservation(value: string, category: ObservationCategory, sectionI
   if (lower.includes("contrast")) results.push({ kind: "contrast", value: normalized, normalizedValue: "contrast" });
   if (lower.includes("hover") || lower.includes("active")) results.push({ kind: "state", value: normalized, normalizedValue: "state" });
   if (lower.includes("logo") || lower.includes("icon")) results.push({ kind: "icon", value: normalized, normalizedValue: "icon-or-logo" });
-  if (lower.includes("sentence case") || lower.includes("title case")) results.push({ kind: "capitalization", value: normalized, normalizedValue: normalized.toLowerCase() });
-  if (lower.includes("tone") || lower.includes("voice")) results.push({ kind: "tone", value: normalized, normalizedValue: normalized.toLowerCase() });
+  if (lower.includes("sentence case") || lower.includes("title case")) {
+    results.push({ kind: "capitalization", value: normalized, normalizedValue: normalized.toLowerCase() });
+  }
+  if (lower.includes("tone") || lower.includes("voice")) {
+    results.push({ kind: "tone", value: normalized, normalizedValue: normalized.toLowerCase() });
+  }
+}
 
+function parseObservation(value: string, category: ObservationCategory, sectionId: SkillSectionId) {
+  const normalized = normalizeValue(value);
+  const lower = normalized.toLowerCase();
+  const results: Array<{ kind: FactKind; value: string; normalizedValue: string }> = [];
+
+  if (sectionId === "voice") {
+    const voiceHeuristics = parseVoiceObservationHeuristics(value, lower, normalized);
+    if (voiceHeuristics.length) return voiceHeuristics;
+
+    const omitTokens =
+      !looksLikeCssOrTokenLine(normalized) && normalized.length > 50
+        ? { omitCssTokensAndHex: true as const }
+        : undefined;
+    appendDesignTokenFacts(normalized, lower, results, omitTokens);
+    if (!results.length) {
+      results.push({ kind: fallbackKindForCategory(category, sectionId), value: normalized, normalizedValue: normalized.toLowerCase() });
+    }
+    return results;
+  }
+
+  appendDesignTokenFacts(normalized, lower, results);
   if (!results.length) {
     results.push({ kind: fallbackKindForCategory(category, sectionId), value: normalized, normalizedValue: normalized.toLowerCase() });
   }
   return results;
 }
 
-function selectFactsForSection(sectionId: SkillSectionId, facts: CompiledEvidenceFact[]) {
-  const limit = SECTION_FACT_LIMITS[sectionId] ?? 10;
+function factKindSortPriority(sectionId: SkillSectionId, kind: FactKind): number {
+  const base = FACT_KIND_PRIORITY[kind] || 0;
+  if (sectionId !== "voice") return base;
+  const voiceBoost: Partial<Record<FactKind, number>> = {
+    tone: 20,
+    "copy-pattern": 20,
+    capitalization: 18,
+    "label-style": 18
+  };
+  return base + (voiceBoost[kind] || 0);
+}
+
+function selectFactsForSection(sectionId: SkillSectionId, facts: CompiledEvidenceFact[], colorsFactLimit?: number) {
+  const defaultLimit = SECTION_FACT_LIMITS[sectionId] ?? 10;
+  const limit =
+    sectionId === "colors" && colorsFactLimit !== undefined ? colorsFactLimit : defaultLimit;
   return facts
     .slice()
     .sort((a, b) => {
@@ -261,7 +382,7 @@ function selectFactsForSection(sectionId: SkillSectionId, facts: CompiledEvidenc
       if (b.frequency !== a.frequency) return b.frequency - a.frequency;
       return a.normalizedValue.localeCompare(b.normalizedValue);
     })
-    .sort((a, b) => (FACT_KIND_PRIORITY[b.kind] || 0) - (FACT_KIND_PRIORITY[a.kind] || 0))
+    .sort((a, b) => factKindSortPriority(sectionId, b.kind) - factKindSortPriority(sectionId, a.kind))
     .slice(0, limit);
 }
 
@@ -292,8 +413,13 @@ function detectConflicts(facts: CompiledEvidenceFact[]): EvidenceConflict[] {
   return conflicts;
 }
 
-function buildUnknowns(section: SkillSectionDefinition, facts: CompiledEvidenceFact[]) {
+function buildUnknowns(section: SkillSectionDefinition, facts: CompiledEvidenceFact[], voiceReadableTextAvailable: boolean) {
   if (facts.length) return [];
+  if (section.id === "voice" && voiceReadableTextAvailable) {
+    return [
+      "Readable text is present; only state copy patterns clearly supported by observations; do not invent a full brand voice."
+    ];
+  }
   return [section.emptyEvidencePolicy];
 }
 
@@ -315,6 +441,7 @@ function computeSpecificityWeight(fact: Omit<CompiledEvidenceFact, "supportScore
 
 function fallbackKindForCategory(category: ObservationCategory, sectionId: SkillSectionId): FactKind {
   if (sectionId === "voice") return "tone";
+  if (category === "voice") return "tone";
   if (sectionId === "brand") return "identity-constraint";
   if (category === "color") return "semantic-color-hint";
   if (category === "typography") return "hierarchy";

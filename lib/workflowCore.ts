@@ -1,11 +1,12 @@
-import { addProgress, getSession, updateSession } from "./store";
+import { addProgress, getSession, getSettingsMemory, updateSession } from "./store";
 import { createProvider, type LlmProvider } from "./providers";
 import {
   STATIC_BASELINE_SECTION_IDS,
   REQUIRED_SKILL_SECTIONS,
   SECTION_DEFINITION_BY_HEADING,
-  SKILL_SECTION_DEFINITIONS,
   SKILL_TITLE,
+  clampMaxCssColors,
+  skillSectionDefinitionsForColorBudget,
   type SkillSectionDefinition
 } from "./skillSections";
 import {
@@ -16,7 +17,13 @@ import {
   getRepeatedSkillBullets,
   getVagueSkillPhrases
 } from "./skillQualityCore";
-import { compileSectionEvidence, normalizeObservationCategory, type CompiledSectionEvidence, type ObservationCategory } from "./sectionEvidence";
+import {
+  compileSectionEvidence,
+  normalizeObservationCategory,
+  urlAssetsHaveSubstantialReadableText,
+  type CompiledSectionEvidence,
+  type ObservationCategory
+} from "./sectionEvidence";
 import { validateSectionClaims } from "./sectionValidation";
 import { collectPinnedBrandCards, formatRequiredBrandPinsBlock, type ImageCard } from "./imageCards";
 import type {
@@ -40,6 +47,8 @@ type GenerationRuntimeOptions = {
   sectionClaimValidationEnabled?: boolean;
   sectionEvidenceDiagnosticsEnabled?: boolean;
   sectionStaticBaselinesEnabled?: boolean;
+  /** Overrides persisted settings maxCssColors for this run when set. */
+  maxCssColors?: number;
 };
 type SectionDraft = { heading: string; critique: string; revised: string };
 type SectionEvidencePacket = {
@@ -93,6 +102,11 @@ export async function runGeneration(
       addProgress(sessionId, "ingesting_asset", `Prepared ${asset.name}.`);
       if (asset.warning) addProgress(sessionId, "warning", `${asset.name}: ${asset.warning}`);
     }
+    const maxCssColors = clampMaxCssColors(runtimeOptions?.maxCssColors ?? getSettingsMemory().maxCssColors);
+    const sectionDefinitions = skillSectionDefinitionsForColorBudget(maxCssColors);
+    const sectionDefinitionByHeading: Record<string, SkillSectionDefinition> = Object.fromEntries(
+      sectionDefinitions.map((section) => [section.heading, section])
+    );
     const provider = runtimeOptions?.provider ?? createProvider(providerConfig);
     const usageTotals: TokenUsage = {};
     const skeletonMarkdown = buildSkeletonSkillMarkdown();
@@ -117,7 +131,10 @@ export async function runGeneration(
     });
     const observations = parseObservations(rawExtraction, usableAssets);
     addProgress(sessionId, "synthesizing_rules", "Planning section-specific evidence packets.", { stepId: "plan_sections" });
-    const compiledEvidence = compileSectionEvidence(observations, usableAssets);
+    const compiledEvidence = compileSectionEvidence(observations, usableAssets, {
+      sectionDefinitions,
+      colorsFactLimit: maxCssColors
+    });
     const sectionEvidence = buildSectionEvidence(
       observations,
       compiledEvidence,
@@ -125,7 +142,9 @@ export async function runGeneration(
       {
         useCompiled: sectionEvidenceCompilerEnabled,
         shadowCompiled: sectionEvidenceShadowEnabled,
-        staticBaselines: sectionStaticBaselinesEnabled
+        staticBaselines: sectionStaticBaselinesEnabled,
+        sectionDefinitions,
+        maxCssColors
       }
     );
     if (sectionEvidenceDiagnosticsEnabled) {
@@ -274,8 +293,8 @@ export async function runGeneration(
       runtimeOptions?.retriesPerSection ?? DEFAULT_RETRIES_PER_SECTION,
       runtimeOptions?.sectionTimeoutMs ?? DEFAULT_SECTION_TIMEOUT_MS
     );
-    const markdown = normalizeSkillMarkdown(finalizedMarkdown);
-    const qualityNotes = buildQualityNotes(markdown, sectionDrafts, compiledEvidence);
+    const markdown = normalizeSkillMarkdown(finalizedMarkdown, sectionDefinitionByHeading);
+    const qualityNotes = buildQualityNotes(markdown, sectionDrafts, compiledEvidence, sectionDefinitions);
 
     const sampleHtml = await runStreamedStep({
       sessionId,
@@ -398,14 +417,43 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
   }
 }
 
+function observationEvidenceKey(observation: SourceObservation) {
+  return `${observation.assetName}::${observation.observation}`.toLowerCase();
+}
+
+function mergeVoiceHybridEvidence(compiledLines: SourceObservation[], rawLines: SourceObservation[], maxLines: number): SourceObservation[] {
+  const keys = new Set<string>();
+  const out: SourceObservation[] = [];
+  for (const obs of compiledLines) {
+    const key = observationEvidenceKey(obs);
+    if (keys.has(key)) continue;
+    keys.add(key);
+    out.push(obs);
+  }
+  for (const obs of rawLines) {
+    if (out.length >= maxLines) break;
+    const key = observationEvidenceKey(obs);
+    if (keys.has(key)) continue;
+    keys.add(key);
+    out.push(obs);
+  }
+  return out;
+}
+
 function buildSectionEvidence(
   observations: SourceObservation[],
   compiled: CompiledSectionEvidence[],
   assets: DesignAsset[],
-  options: { useCompiled: boolean; shadowCompiled: boolean; staticBaselines: boolean }
+  options: {
+    useCompiled: boolean;
+    shadowCompiled: boolean;
+    staticBaselines: boolean;
+    sectionDefinitions: SkillSectionDefinition[];
+    maxCssColors: number;
+  }
 ): SectionEvidencePacket[] {
   const brandPins = collectPinnedBrandCards(assets);
-  return SKILL_SECTION_DEFINITIONS.map((section) => {
+  return options.sectionDefinitions.map((section) => {
     const compiledPacket = compiled.find((entry) => entry.section.id === section.id);
     const staticSection = options.staticBaselines && STATIC_BASELINE_SECTION_IDS.includes(section.id);
     const compiledObservations =
@@ -420,15 +468,28 @@ function buildSectionEvidence(
       (observation) =>
         observation.confidence !== "low" && section.evidenceCategories.includes(normalizeObservationCategory(observation.category))
     );
-    const chosen = options.useCompiled && compiledObservations.length ? compiledObservations : categoryFiltered.length ? categoryFiltered : observations;
+    let chosen: SourceObservation[];
+    if (options.useCompiled && compiledObservations.length) {
+      if (section.id === "voice" && urlAssetsHaveSubstantialReadableText(assets) && categoryFiltered.length) {
+        chosen = mergeVoiceHybridEvidence(compiledObservations, categoryFiltered, MAX_EVIDENCE_LINES_PER_SECTION);
+      } else {
+        chosen = compiledObservations;
+      }
+    } else if (categoryFiltered.length) {
+      chosen = categoryFiltered;
+    } else {
+      chosen = observations;
+    }
     const diagnostics: string[] = [];
     if (options.shadowCompiled && compiledPacket) {
       diagnostics.push(`compiled_selected=${compiledPacket.selectedFacts.length}`);
       diagnostics.push(`legacy_selected=${categoryFiltered.length}`);
     }
+    const evidenceCap =
+      section.id === "colors" ? Math.max(MAX_EVIDENCE_LINES_PER_SECTION, options.maxCssColors + 4) : MAX_EVIDENCE_LINES_PER_SECTION;
     return {
       section,
-      observations: chosen.slice(0, MAX_EVIDENCE_LINES_PER_SECTION),
+      observations: chosen.slice(0, evidenceCap),
       compiled: compiledPacket,
       diagnostics,
       isStaticSection: staticSection,
@@ -459,7 +520,12 @@ function buildIncrementalSkillMarkdown(sectionDrafts: SectionDraft[]) {
   });
   return `${SKILL_TITLE}\n\n${blocks.join("\n\n")}`;
 }
-function buildQualityNotes(markdown: string, sectionDrafts: SectionDraft[], compiledEvidence: CompiledSectionEvidence[]) {
+function buildQualityNotes(
+  markdown: string,
+  sectionDrafts: SectionDraft[],
+  compiledEvidence: CompiledSectionEvidence[],
+  sectionDefinitions: SkillSectionDefinition[]
+) {
   const notes = sectionDrafts.map((section) => `${section.heading}: ${splitLines(section.critique)[0] || "No critique notes."}`);
   const missing = getMissingSkillSections(markdown);
   if (missing.length) notes.push(`Missing sections: ${missing.join(", ")}`);
@@ -467,7 +533,7 @@ function buildQualityNotes(markdown: string, sectionDrafts: SectionDraft[], comp
   if (vague.length) notes.push(`Vague phrases found: ${vague.join(", ")}`);
   const repeated = getRepeatedSkillBullets(markdown);
   if (repeated.length) notes.push(`Repeated bullets: ${repeated.slice(0, 3).join(" | ")}`);
-  notes.push(...getCompactnessIssues(markdown).slice(0, 3));
+  notes.push(...getCompactnessIssues(markdown, sectionDefinitions).slice(0, 3));
   notes.push(...getCrossSectionContaminationIssues(markdown).slice(0, 2));
   const factValues = compiledEvidence.flatMap((packet) => packet.selectedFacts.map((fact) => fact.normalizedValue));
   const groundingCoverage = getGroundingCoverage(markdown, factValues);
@@ -477,8 +543,10 @@ function buildQualityNotes(markdown: string, sectionDrafts: SectionDraft[], comp
 
 export function buildExtractionPrompt(guidance?: string) {
   return `You are extracting design-system guidance for a Codex SKILL.md file.
-Return bullets: - category=<one of color|typography|layout|components|accessibility|visual language>; confidence=<high|medium|low>; source=<asset name>; observation=<concrete observation>
+Return bullets: - category=<one of color|typography|layout|components|accessibility|visual language|voice>; confidence=<high|medium|low>; source=<asset name>; observation=<concrete observation>
 Preserve concrete values (font families, type sizes, CSS variables, colors, tokens, spacing, radii, states). Keep each bullet under 180 characters.
+Also extract copy and voice signals for category=voice from URL assets: read "## Readable Page Text" and visible UI strings. Cover tone (formal/casual/playful), point of view (we/you), CTA phrasing, headline vs body patterns, capitalization (sentence vs title case, ALL CAPS segments), punctuation habits, and length/clarity of lines. Use category=voice for anything primarily about words, not CSS.
+For each URL asset whose "## Readable Page Text" section is longer than 200 characters (excluding the placeholder "No readable page text extracted."), emit at least one voice bullet tied to that asset name in source=.
 Do not use emojis.
 Optional user guidance: ${guidance || "none"}`;
 }
@@ -530,9 +598,16 @@ ${evidence}${requiredBrandPins}`;
 }
 function buildSectionCritiquePrompt(packet: SectionEvidencePacket, draftSection: string) {
   const section = packet.section;
-  const evidence = packet.compiled?.selectedFacts.length
-    ? packet.compiled.selectedFacts.map((fact) => `- ${fact.value}`).join("\n")
-    : packet.observations.map((item) => `- ${item.assetName}: ${item.observation}`).join("\n") || "- none";
+  let evidence: string;
+  if (section.id === "voice" && packet.compiled?.selectedFacts.length) {
+    const factLines = packet.compiled.selectedFacts.map((fact) => `- ${fact.value}`).join("\n");
+    const obsLines = packet.observations.map((item) => `- ${item.assetName}: ${item.observation}`).join("\n") || "- none";
+    evidence = `Compiled facts:\n${factLines}\n\nObserved evidence lines:\n${obsLines}`;
+  } else if (packet.compiled?.selectedFacts.length) {
+    evidence = packet.compiled.selectedFacts.map((fact) => `- ${fact.value}`).join("\n");
+  } else {
+    evidence = packet.observations.map((item) => `- ${item.assetName}: ${item.observation}`).join("\n") || "- none";
+  }
   return `Critique this section ${section.heading} for unsupported claims, vagueness, repetition, bullet-length violations, and any emoji usage.
 Evidence:
 ${evidence}
@@ -702,11 +777,14 @@ function makePatch(category: VerificationFinding["category"], text: string) {
   const heading = category === "conflict" ? "### Conflict Resolution" : "### Additional Design Rule";
   return `${heading}\n- ${text.replace(/Suggested patch:/i, "").trim()}`;
 }
-function normalizeSkillMarkdown(markdown: string) {
+function normalizeSkillMarkdown(
+  markdown: string,
+  definitionByHeading: Record<string, SkillSectionDefinition> = SECTION_DEFINITION_BY_HEADING
+) {
   const stripped = markdown.replace(/^```(?:markdown)?/i, "").replace(/```$/i, "").trim();
   const withTitle = stripped.startsWith("#") ? stripped : `${SKILL_TITLE}\n\n${stripped}`;
   const blocks = REQUIRED_SKILL_SECTIONS.map((heading) => {
-    const definition = SECTION_DEFINITION_BY_HEADING[heading];
+    const definition = definitionByHeading[heading] ?? SECTION_DEFINITION_BY_HEADING[heading];
     const body = extractSectionBody(withTitle, heading);
     return `${heading}\n${normalizeSectionBody(heading, body || definition.emptyEvidencePolicy, definition.target.maxBullets)}`;
   });
@@ -741,6 +819,12 @@ function splitLines(text: string) {
 }
 function inferCategory(line: string): ObservationCategory {
   const lower = line.toLowerCase();
+  if (
+    /\b(tone|voice|microcopy|copywriting|headline|tagline|strapline|cta|wording|punctuation|placard|narrative)\b/.test(lower) ||
+    /\b(we|our|your|you're)\b/.test(lower)
+  ) {
+    return "voice";
+  }
   if (lower.includes("color") || lower.includes("palette") || lower.includes("token")) return "color";
   if (lower.includes("type") || lower.includes("font")) return "typography";
   if (lower.includes("layout") || lower.includes("grid")) return "layout";

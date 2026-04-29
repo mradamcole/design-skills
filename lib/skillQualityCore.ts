@@ -1,4 +1,9 @@
-import { REQUIRED_SKILL_SECTIONS, SECTION_INTENTS, SKILL_SECTION_DEFINITIONS } from "./skillSections";
+import {
+  REQUIRED_SKILL_SECTIONS,
+  SECTION_INTENTS,
+  SKILL_SECTION_DEFINITIONS,
+  type SkillSectionDefinition
+} from "./skillSections";
 
 const VAGUE_PHRASES = [
   "clean and modern",
@@ -34,9 +39,9 @@ export function getRepeatedSkillBullets(markdown: string) {
     .map(([line]) => line);
 }
 
-export function getCompactnessIssues(markdown: string) {
+export function getCompactnessIssues(markdown: string, sectionDefinitions: SkillSectionDefinition[] = SKILL_SECTION_DEFINITIONS) {
   const issues: string[] = [];
-  for (const section of SKILL_SECTION_DEFINITIONS) {
+  for (const section of sectionDefinitions) {
     const body = extractSectionBody(markdown, section.heading);
     if (!body) {
       issues.push(`${section.heading}: section body is empty.`);

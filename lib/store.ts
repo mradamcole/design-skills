@@ -21,6 +21,7 @@ const defaultSettingsMemory: UserSettingsMemory = {
   baseUrl: "http://localhost:11434",
   guidance: "",
   existingSkill: "",
+  maxCssColors: 16,
   assets: []
 };
 
